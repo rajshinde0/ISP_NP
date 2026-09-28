@@ -1,6 +1,9 @@
-osmnx
-networkx
-streamlit
-streamlit-folium
-folium
-matplotlib
+# Exact pins for what is verified installed in the dev environment; compatible ranges for the
+# rest. The osmnx bound matters most: osmnx 2.x renamed and removed a lot of the 1.x API, so an
+# unpinned install can silently break stage 0 months from now.
+networkx==3.6.1
+streamlit==1.57.0
+matplotlib==3.10.8
+osmnx>=2.0,<3.0
+folium>=0.19,<1.0
+streamlit-folium>=0.24,<1.0
