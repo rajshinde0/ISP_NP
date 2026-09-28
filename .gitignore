@@ -7,3 +7,5 @@ env/
 .ipynb_checkpoints/
 cache/
 *.graphml
+node_modules/
+package-lock.json

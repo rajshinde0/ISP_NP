@@ -29,7 +29,10 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | `app.py` | B | Stage 6: Streamlit + Folium dashboard |
 | `bench.py` | both | Stage-1 benchmark CLI; writes the report's CSV/PNG/Markdown |
 | `tests/` | both | Correctness tests against NetworkX and brute force |
+| `docs/report.md` | both | Milestone 7: the final report (source) |
+| `docs/ISP_Network_Planner_Report.docx` | both | The same report, submittable |
 | `docs/np-hardness.md` | both | Milestone 7: the NP-hardness writeup |
+| `tools/md2docx.js` | both | Regenerates the .docx from the markdown (`npm run report`) |
 
 `interface.py` is the artifact to check at every sync. Read it before changing any stage.
 
@@ -289,8 +292,13 @@ the self-loop drop, the fallback order, and the error message. **Run it once on 
 connection before relying on it in the demo.** If it fails, the dashboard now shows what each
 strategy said instead of a traceback, and the synthetic grid always works offline.
 
+## The report
+
+[`docs/report.md`](docs/report.md) is the final report; `docs/ISP_Network_Planner_Report.docx` is
+the same document in submittable form. Edit the markdown and run `npm run report` to regenerate the
+Word version (`npm install` once first).
+
 ## Still to do
 
 - **Verify the OSM fetch end to end** on a connection with working Overpass access (above).
-- **The final report itself.** `docs/np-hardness.md` covers milestone 7's theory half and
-  `bench/` holds the runtime curves, but the report document has not been written.
+- Read the report through once in Word and adjust the wording to your own voice before submitting.

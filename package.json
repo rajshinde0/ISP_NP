@@ -1,0 +1,11 @@
+{
+  "name": "isp-planner-docs",
+  "private": true,
+  "description": "Tooling only: converts docs/report.md to a submittable .docx. The project itself is Python.",
+  "scripts": {
+    "report": "node tools/md2docx.js docs/report.md docs/ISP_Network_Planner_Report.docx"
+  },
+  "dependencies": {
+    "docx": "^9.8.1"
+  }
+}
