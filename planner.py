@@ -434,10 +434,15 @@ def backbone(G, tower_nodes, extra_links=0):
 
 
 # ---------------- Stage 4: Edmonds-Karp ----------------
-def edmonds_karp(cap, s, t):
+def edmonds_karp(cap, s, t, flows=None):
     """Max-flow by BFS shortest augmenting path (Edmonds-Karp, O(V*E^2)) - not plain
     Ford-Fulkerson; the BFS is what bounds the iteration count.
-    cap: dict u -> dict v -> capacity (a copy is modified). Returns (flow, min-cut edges)."""
+    cap: dict u -> dict v -> capacity (a copy is modified). Returns (flow, min-cut edges).
+
+    flows: optional dict, filled with {(u, v): flow on that arc}. This is the *net* flow, derived
+    as capacity minus residual, so it is exact only where the network has no antiparallel arcs -
+    true of the bipartite assignment network, NOT of the backbone (whose undirected links become
+    arcs both ways, letting the residual of one absorb the cancellation of the other)."""
     res = {u: dict(vs) for u, vs in cap.items()}
     for u, vs in cap.items():
         for v in vs:
@@ -466,6 +471,10 @@ def edmonds_karp(cap, s, t):
             if c > 0 and v not in reach:
                 reach.add(v); q.append(v)
     cut = [(u, v, c) for u, vs in cap.items() for v, c in vs.items() if u in reach and v not in reach and c > 0]
+    if flows is not None:
+        for u, vs in cap.items():
+            for v, c in vs.items():
+                flows[(u, v)] = c - res[u][v]
     return flow, cut
 
 
@@ -514,20 +523,84 @@ def describe_cut(cut):
     return rows, links, nodes
 
 
-# ---------------- driver ----------------
-def assign_customers(G, C, D, sites):
-    out = {i: 0 for i in range(len(sites))}
+# ---------------- Stage 2b: customer assignment ----------------
+def _covering(G, C, D, sites):
+    """For each demand index, the (distance, tower index) pairs whose radius reaches it, nearest
+    first. The single place the coverage rule lives - both assignment strategies read it, so they
+    can never disagree about who can serve whom. O(|D| * k)."""
+    out = []
     for d in D:
         dn = G.nodes[d["node"]]
-        best = None
+        hits = []
         for k, s in enumerate(sites):
             cn = G.nodes[C[s]["node"]]
             dd = math.hypot(cn["x"] - dn["x"], cn["y"] - dn["y"])
-            if dd <= RADIUS[C[s]["tier"]] and (best is None or dd < best[0]):
-                best = (dd, k)
-        if best:
-            out[best[1]] += d["w"]
+            if dd <= RADIUS[C[s]["tier"]]:
+                hits.append((dd, k))
+        hits.sort()
+        out.append(hits)
     return out
+
+
+def assign_customers(G, C, D, sites):
+    """Greedy: every customer to its NEAREST covering tower, capacity ignored. O(|D| * k).
+
+    Simple and fast, but it over-subscribes popular towers - on the default instance it piles 146%
+    of one tower's purchased capacity onto it while five others idle near 50%. Kept for two
+    reasons: assign_customers_flow needs a provisional load to size equipment against (capacity
+    and assignment are otherwise circular), and the contrast is worth showing.
+    Returns {tower index: customer weight}.
+    """
+    out = {i: 0 for i in range(len(sites))}
+    for j, hits in enumerate(_covering(G, C, D, sites)):
+        if hits:
+            out[hits[0][1]] += D[j]["w"]
+    return out
+
+
+def assign_customers_flow(G, C, D, sites, caps, mbps):
+    """Capacity-aware: assign customers by max-flow so no tower is asked for more than the
+    equipment actually bought for it.
+
+        SRC      -> demand j    capacity w_j * mbps
+        demand j -> tower k     capacity w_j * mbps, for every tower whose radius covers j
+        tower k  -> SINK        capacity caps[k]
+
+    All capacities are integral Mbps, which is what gives Edmonds-Karp its clean termination
+    argument. The max flow is the most bandwidth this built network can actually deliver; each
+    tower's share is the flow on its SINK arc. Reuses edmonds_karp - the same Unit V machinery
+    stage 4 runs. O(V*E^2) on a bipartite network of |D| + k + 2 nodes.
+
+    Returns (load_mbps per tower, unserved_mbps). A non-zero unserved figure is a real result -
+    "this much demand cannot be served with the equipment purchased" - and strictly more honest
+    than the greedy version, which reports nothing and silently overloads instead.
+
+    Deliberate limitation: max-flow maximises the TOTAL served and is indifferent between tied
+    optima, so a customer may be routed to a farther tower when a nearer one would have done.
+    Fixing that is a min-cost flow, out of scope here; the objective is customers served, which is
+    what the dashboard reports.
+    """
+    cov = _covering(G, C, D, sites)
+    cap = {}
+
+    def arc(u, v, c):
+        cap.setdefault(u, {})[v] = c
+
+    total = sum(d["w"] * mbps for d in D)
+    for j, d in enumerate(D):
+        if not cov[j]:
+            continue                       # no built tower reaches it: counts as unserved
+        need = d["w"] * mbps
+        arc("SRC", ("d", j), need)
+        for _, k in cov[j]:
+            arc(("d", j), ("t", k), need)
+    for k, c in enumerate(caps):
+        arc(("t", k), "SINK", c)
+    cap.setdefault("SINK", {})
+    flows = {}
+    served, _ = edmonds_karp(cap, "SRC", "SINK", flows=flows)
+    load = [flows.get((("t", k), "SINK"), 0) for k in range(len(sites))]
+    return load, total - served
 
 
 def benchmark(G, sizes=(8, 12, 16, 20, 24, 28), n_demand=60, seed=1, limit=20, naive=True, progress=None):

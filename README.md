@@ -41,6 +41,7 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | 1 | Cheapest tower set covering every customer | Greedy weighted set cover (`greedy_cover`) | O(\|C\|² · \|D\|/64), (ln n + 1)-approx | IV + VI |
 | 1 | ...and the true optimum | Backtracking + branch and bound (`exact_cover`) | O(2^\|C\|) worst case | IV + VI |
 | 2 | Equipment per tower under budget | 0/1 knapsack DP (`knapsack`, `equip_towers`) | O(n · B) per tower | III |
+| 2b | Assign customers within capacity | Max-flow on a bipartite network (`assign_customers_flow`) | O(V · E²) | V |
 | 3 | Wire towers with least cable | Prim MST over the road-distance metric closure (`backbone`) | k Dijkstras + O(k²) | II / IV |
 | 4 | Push bandwidth from exchange, find bottleneck | Edmonds–Karp max-flow / min-cut (`edmonds_karp`) | O(V · E²) | V |
 | 5 | Route signal tower → customer | Binary-heap Dijkstra (`dijkstra`) | O((V+E) log V) | II |
@@ -78,6 +79,34 @@ Four things for the report and the viva:
   cannot improve the incumbent.
 
 Greedy is strictly costlier than the optimum on 8 of 10 seeds, by up to 62%.
+
+## Stage 2b: why the nearest tower is the wrong answer
+
+`assign_customers` sends every customer to their nearest covering tower and ignores capacity
+entirely. On the default instance that is not merely unbalanced, it is **wrong about what the
+network delivers**:
+
+| | nearest tower | max-flow |
+|---|---|---|
+| T0 load vs its 1300 Mbps of kit | 1900 Mbps — **146%** | 1300 Mbps — 100% |
+| T1–T5 utilisation | 46–50% | 46–50% |
+| Total claimed served | 3315 Mbps | 2715 Mbps |
+| Unserved, reported | *nothing* | **600 Mbps** |
+
+`assign_customers_flow` models it as a flow problem — `SRC → customer → eligible towers → SINK`
+with each tower's purchased capacity on its sink arc — and reuses `edmonds_karp`, the same Unit V
+machinery stage 4 runs. Verified against `nx.maximum_flow_value`, so it is the true maximum and not
+merely a feasible assignment.
+
+The diagnosis is sharper than "rebalance it". **T0 has 1900 Mbps of demand that no other built
+tower can reach**, and 1300 Mbps is the most any budget can buy, so 600 Mbps is unservable by any
+assignment. Only 540 Mbps of demand sits in range of more than one tower. The planning conclusion
+is to build another tower in T0's area — not to buy a bigger radio — and the dashboard now says so
+instead of silently claiming full service.
+
+**Circular dependency, and how it is broken.** Equipment is sized from the load, but a
+capacity-aware assignment needs the capacities. Two phases: the greedy pass gives a provisional
+load to buy against, then max-flow reassigns optimally against what was bought.
 
 ## Stage 5: what the A* heuristic buys
 

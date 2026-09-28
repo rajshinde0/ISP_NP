@@ -571,6 +571,130 @@ def test_assign_customers_conserves_weight_and_respects_radius(graph):
                    for s in sites)
 
 
+# ---------------- Stage 2b: capacity-aware assignment ----------------
+def _bipartite_ref(graph, C, D, sites, caps, mbps):
+    """The same assignment network, handed to networkx as an independent oracle."""
+    cov = P._covering(graph, C, D, sites)
+    H = nx.DiGraph()
+    for j, d in enumerate(D):
+        if not cov[j]:
+            continue
+        need = d["w"] * mbps
+        H.add_edge("SRC", ("d", j), capacity=need)
+        for _, k in cov[j]:
+            H.add_edge(("d", j), ("t", k), capacity=need)
+    for k, c in enumerate(caps):
+        H.add_edge(("t", k), "SINK", capacity=c)
+    return nx.maximum_flow_value(H, "SRC", "SINK", capacity="capacity")
+
+
+def _planned(graph, seed=0, n_cand=20, mbps=5, budget=12):
+    D, C, _ = P.make_instance(graph, 60, n_cand, seed)
+    sites = P.exact_cover(C, D, 20)["sites"]
+    cust = P.assign_customers(graph, C, D, sites)
+    greedy_load = [cust[k] * mbps for k in range(len(sites))]
+    caps, _, _ = P.equip_towers(C, sites, greedy_load, budget)
+    return D, C, sites, caps, greedy_load, mbps
+
+
+def test_covering_respects_the_radius_and_is_sorted_by_distance(graph):
+    D, C, sites, _, _, _ = _planned(graph)
+    cov = P._covering(graph, C, D, sites)
+    assert len(cov) == len(D)
+    for j, hits in enumerate(cov):
+        dn = graph.nodes[D[j]["node"]]
+        assert hits == sorted(hits), "nearest tower must come first"
+        for dd, k in hits:
+            cn = graph.nodes[C[sites[k]]["node"]]
+            real = math.hypot(cn["x"] - dn["x"], cn["y"] - dn["y"])
+            assert dd == pytest.approx(real)
+            assert real <= P.RADIUS[C[sites[k]]["tier"]] + 1e-9
+        # and nothing in range was left out
+        in_range = {k for k, sidx in enumerate(sites)
+                    if math.hypot(graph.nodes[C[sidx]["node"]]["x"] - dn["x"],
+                                  graph.nodes[C[sidx]["node"]]["y"] - dn["y"])
+                    <= P.RADIUS[C[sidx]["tier"]]}
+        assert {k for _, k in hits} == in_range
+
+
+def test_flow_assignment_never_exceeds_a_tower_capacity(graph):
+    """The defect this feature exists to fix: the greedy version loads one tower to 146%."""
+    for seed in range(4):
+        D, C, sites, caps, greedy_load, mbps = _planned(graph, seed=seed)
+        load, unserved = P.assign_customers_flow(graph, C, D, sites, caps, mbps)
+        for k in range(len(sites)):
+            assert load[k] <= caps[k], f"seed {seed}: tower {k} over capacity"
+        assert min(unserved, 0) == 0 and unserved >= 0
+
+
+def test_greedy_assignment_really_does_overload_on_the_default_instance(graph):
+    """Pins the motivating measurement, so nobody 'simplifies' the flow version away later."""
+    D, C, sites, caps, greedy_load, mbps = _planned(graph, seed=0)
+    over = [k for k in range(len(sites)) if greedy_load[k] > caps[k]]
+    assert over, "greedy no longer overloads - re-check whether feature 2 is still needed"
+    worst = max(greedy_load[k] / caps[k] for k in range(len(sites)))
+    assert worst > 1.2, f"worst greedy utilisation only {worst:.0%}"
+
+
+def test_flow_assignment_conserves_demand(graph):
+    for seed in range(4):
+        D, C, sites, caps, _, mbps = _planned(graph, seed=seed)
+        load, unserved = P.assign_customers_flow(graph, C, D, sites, caps, mbps)
+        assert sum(load) + unserved == sum(d["w"] for d in D) * mbps
+
+
+def test_flow_assignment_matches_networkx_max_flow(graph):
+    """It must actually be the maximum, not merely feasible - a capacity-respecting assignment
+    that serves nobody would pass every test above."""
+    for seed in range(4):
+        D, C, sites, caps, _, mbps = _planned(graph, seed=seed)
+        load, _ = P.assign_customers_flow(graph, C, D, sites, caps, mbps)
+        assert sum(load) == _bipartite_ref(graph, C, D, sites, caps, mbps)
+
+
+def test_flow_assignment_serves_everything_when_capacity_is_unlimited(graph):
+    """Isolates capacity from coverage: with infinite kit the only unserved demand would be
+    demand no built tower reaches, and stage 1 guarantees there is none."""
+    D, C, sites, caps, _, mbps = _planned(graph, seed=0)
+    load, unserved = P.assign_customers_flow(graph, C, D, sites, [10 ** 9] * len(sites), mbps)
+    assert unserved == 0
+    assert sum(load) == sum(d["w"] for d in D) * mbps
+
+
+def test_flow_assignment_beats_greedy_on_a_hand_built_overload(graph):
+    """Two towers both cover the same crowd; only one is near it. Greedy sends everyone to the
+    near one and busts its capacity; flow splits the crowd and serves all of them."""
+    Gm = nx.Graph()
+    Gm.add_node(0, x=0.0, y=0.0)          # tower A site
+    Gm.add_node(1, x=100.0, y=0.0)        # tower B site, a little further from the crowd
+    for j in range(4):                    # four demand clusters near A, all within B's reach too
+        Gm.add_node(10 + j, x=10.0 + j, y=0.0)
+    D = [{"node": 10 + j, "w": 10} for j in range(4)]
+    C = [{"node": 0, "tier": "mid", "cost": 1.0, "mask": 0b1111},
+         {"node": 1, "tier": "mid", "cost": 1.0, "mask": 0b1111}]
+    sites, mbps, caps = [0, 1], 1, [20, 20]     # 40 Mbps demand, 20 + 20 capacity
+    cust = P.assign_customers(Gm, C, D, sites)
+    assert cust[0] == 40 and cust[1] == 0, "greedy should pile everyone onto the nearer tower"
+    load, unserved = P.assign_customers_flow(Gm, C, D, sites, caps, mbps)
+    assert unserved == 0, "flow should split the crowd and serve all 40 Mbps"
+    assert load == [20, 20] or sorted(load) == [20, 20]
+    assert all(load[k] <= caps[k] for k in range(2))
+
+
+def test_edmonds_karp_flows_dict_is_exact_on_a_dag():
+    """assign_customers_flow reads per-arc flows out of this; verify conservation at each node."""
+    cap = {"s": {"a": 5, "b": 3}, "a": {"t": 4}, "b": {"t": 6}, "t": {}}
+    flows = {}
+    total, _ = P.edmonds_karp(cap, "s", "t", flows=flows)
+    assert total == 7
+    assert flows[("s", "a")] + flows[("s", "b")] == total
+    assert flows[("a", "t")] + flows[("b", "t")] == total
+    assert flows[("s", "a")] == flows[("a", "t")]          # conservation at a
+    assert flows[("s", "b")] == flows[("b", "t")]          # conservation at b
+    for (u, v), f in flows.items():
+        assert 0 <= f <= cap[u][v]
+
+
 # ---------------- benchmark plumbing ----------------
 def test_benchmark_rows_are_well_formed(graph):
     rows = P.benchmark(graph, sizes=(8, 10), n_demand=30, seed=0, limit=5)

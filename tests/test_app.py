@@ -85,6 +85,25 @@ def test_stage_2_shows_per_tower_variation(planned):
     assert len(set(caps)) > 1, "every tower got identical equipment; stage 2 is decorative again"
 
 
+def test_stage_2b_shows_the_capacity_aware_assignment(planned):
+    """The flow assignment must respect every capacity in the rendered table - that is the whole
+    point of the feature, and it is the number a demo audience will actually look at."""
+    headers = [str(h.value) for h in planned.subheader]
+    assert any("Stage 2b" in h for h in headers)
+    tbl = None
+    for t in planned.table:
+        cols = list(t.value.columns) if hasattr(t.value, "columns") else []
+        if "max-flow Mbps" in cols:
+            tbl = t.value
+            break
+    assert tbl is not None, "the stage 2b assignment table did not render"
+    caps = list(tbl["capacity Mbps"])
+    flow = list(tbl["max-flow Mbps"])
+    for k, (c, f) in enumerate(zip(caps, flow)):
+        assert f <= c, f"tower {k}: flow assignment {f} exceeds capacity {c}"
+    assert sum(flow) > 0
+
+
 def test_dijkstra_routing_section_reports_a_path(planned):
     assert any("Shortest road path" in str(m.value) for m in planned.markdown)
 

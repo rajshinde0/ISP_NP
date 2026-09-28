@@ -47,10 +47,15 @@ if run:
     ex, gr = P.exact_cover(C, D, limit), P.greedy_cover(C, D)
     sites = ex["sites"]
     towers = [C[i]["node"] for i in sites]
-    # Stage 2 sizes each tower to its own load, so customer assignment has to run first.
+    # Capacity and assignment are circular: stage 2 sizes equipment from the load, but a
+    # capacity-aware assignment needs the capacities. Break it in two phases - the greedy
+    # nearest-tower pass gives a provisional load to buy equipment against, then max-flow
+    # reassigns optimally against what was actually bought.
     cust = P.assign_customers(G, C, D, sites)
-    dem = [cust[k] * mbps for k in range(len(sites))]
-    caps, picks, spends = P.equip_towers(C, sites, dem, budget)
+    dem_greedy = [cust[k] * mbps for k in range(len(sites))]
+    caps, picks, spends = P.equip_towers(C, sites, dem_greedy, budget)
+    dem, unserved = P.assign_customers_flow(G, C, D, sites, caps, mbps)
+    total_demand = sum(d["w"] for d in D) * mbps
     edges, cable = P.backbone(G, towers, extra)
     xs = [G.nodes[t]["x"] for t in towers]; ys = [G.nodes[t]["y"] for t in towers]
     exch = min(range(len(sites)), key=lambda i: (xs[i] - sum(xs) / len(xs)) ** 2 + (ys[i] - sum(ys) / len(ys)) ** 2)
@@ -60,7 +65,9 @@ if run:
     st.session_state["r"] = dict(G=G, D=D, C=C, ex=ex, gr=gr, sites=sites, towers=towers, edges=edges,
                                  cable=cable, flow=flow, cut_rows=cut_rows, cut_links=cut_links,
                                  cut_nodes=cut_nodes, dem=dem, exch=exch, caps=caps, picks=picks,
-                                 spends=spends, dropped=dropped, comps_dropped=comps_dropped)
+                                 spends=spends, dropped=dropped, comps_dropped=comps_dropped,
+                                 dem_greedy=dem_greedy, unserved=unserved,
+                                 total_demand=total_demand)
 
 r = st.session_state.get("r")
 if not r:
@@ -98,13 +105,41 @@ st.caption(f"Greedy costs **{gap:.1f}% more** than the optimum here ({len(r['gr'
 
 # ---- stage 2 ----
 st.subheader("Stage 2: equipment per tower (0/1 knapsack DP)")
-st.table([{"tower": f"T{k}", "tier": C[s]["tier"], "demand Mbps": r["dem"][k], "capacity Mbps": r["caps"][k],
-           "spend k$": r["spends"][k], "bought (cost, Mbps)": str(r["picks"][k]),
-           "met": "yes" if r["caps"][k] >= r["dem"][k] else "NO"}
+st.table([{"tower": f"T{k}", "tier": C[s]["tier"], "sized for Mbps": r["dem_greedy"][k],
+           "capacity Mbps": r["caps"][k], "spend k$": r["spends"][k],
+           "bought (cost, Mbps)": str(r["picks"][k]),
+           "covers its load": "yes" if r["caps"][k] >= r["dem_greedy"][k] else "NO - capped"}
           for k, s in enumerate(r["sites"])])
 st.caption(f"Each tower runs its own DP: allowance = slider + {P.TIER_BONUS['high']} k$ for high-tier sites, "
            f"and the purchase is trimmed to the cheapest level meeting {P.HEADROOM}x its own load "
            f"(the multiple leaves capacity to relay neighbours' traffic).")
+
+# ---- stage 2b ----
+st.subheader("Stage 2b: customer assignment — nearest tower vs max-flow")
+st.table([{"tower": f"T{k}", "capacity Mbps": r["caps"][k],
+           "nearest-tower Mbps": r["dem_greedy"][k],
+           "nearest util": f"{100 * r['dem_greedy'][k] / max(1, r['caps'][k]):.0f}%",
+           "max-flow Mbps": r["dem"][k],
+           "flow util": f"{100 * r['dem'][k] / max(1, r['caps'][k]):.0f}%",
+           "over capacity?": "YES" if r["dem_greedy"][k] > r["caps"][k] else ""}
+          for k in range(len(r["sites"]))])
+g_over = sum(1 for k in range(len(r["sites"])) if r["dem_greedy"][k] > r["caps"][k])
+total_demand = r["total_demand"]
+if g_over:
+    st.caption(
+        f"Assigning every customer to their **nearest** tower puts {g_over} tower(s) over the "
+        f"equipment bought for them — it claims {sum(r['dem_greedy'])} Mbps served when the kit "
+        f"can only carry {sum(r['dem'])}. The **max-flow** assignment respects every capacity and "
+        f"reports the shortfall honestly: **{r['unserved']} of {total_demand} Mbps cannot be "
+        f"served**. Where a tower is the only one covering its customers, no amount of "
+        f"reassignment helps — that is a signal to build another tower there, not to buy a bigger "
+        f"radio.")
+else:
+    st.caption(f"No tower is over-subscribed at these settings, so both assignments agree. "
+               f"Unserved: {r['unserved']} of {total_demand} Mbps.")
+st.caption("Max-flow maximises *total* customers served and is indifferent between tied optima, so "
+           "a customer may be routed to a farther tower than necessary. Preferring nearer towers "
+           "among equal-value solutions would need a min-cost flow, which is out of scope.")
 
 # ---- map ----
 def ll(n): return (G.nodes[n]["lat"], G.nodes[n]["lon"])
