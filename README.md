@@ -44,6 +44,7 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | 2b | Assign customers within capacity | Max-flow on a bipartite network (`assign_customers_flow`) | O(V · E²) | V |
 | 3 | Wire towers with least cable | Prim MST over the road-distance metric closure (`backbone`) | k Dijkstras + O(k²) | II / IV |
 | 3 | Find single points of failure | Tarjan bridge-finding by DFS low-link (`bridges`) | O(V+E) | I |
+| 3 | Site the exchange | 1-median / 1-center over the tower set (`choose_exchange`) | O(k²) | IV |
 | 4 | Push bandwidth from exchange, find bottleneck | Edmonds–Karp max-flow / min-cut (`edmonds_karp`) | O(V · E²) | V |
 | 5 | Route signal tower → customer | Binary-heap Dijkstra (`dijkstra`) | O((V+E) log V) | II |
 | 5 | ...the same answer, guided | A* with a straight-line heuristic (`astar`) | O((V+E) log V), far smaller constant | II |
@@ -137,6 +138,35 @@ So the tests assert the real invariant - `bridges` never leaves *more* failure p
 `cheapest` at the same budget - rather than a improvement that does not always exist. The reporting
 is arguably the bigger win: the default backbone has a single point of failure and nothing said so
 before.
+
+## Stage 3: where to put the exchange
+
+The exchange is the head-end where upstream fibre lands. It used to be "the tower nearest the
+Euclidean centroid of the towers" - a rule that never looks at the road network at all.
+`choose_exchange` offers three, all exact by enumeration since the exchange must sit at one of the
+k towers (unlike general k-median, which is NP-hard):
+
+- `median` (default) - least **total** road distance, weighted by each tower's customer load.
+- `center` - least **worst-case** distance, bounding the unluckiest customer's latency.
+- `centroid` - the original rule, kept as the comparison baseline.
+
+This turned out to matter far more than expected, because the exchange is where *all* traffic
+enters: max-flow across 6 seeds, best rule marked.
+
+| seed | median | center | centroid |
+|---|---|---|---|
+| 0 | **92%** (13.92 km) | **92%** | 63% (12.24 km) |
+| 1 | **60%** | 54% | 54% |
+| 2 | **100%** | 92% | **100%** |
+| 3 | **96%** | **96%** | **96%** |
+| 4 | **100%** | **100%** | 82% |
+| 5 | **100%** | **100%** | **100%** |
+| **best in** | **6 / 6** | 4 / 6 | 3 / 6 |
+
+Note seed 0: the centroid rule picks a **shorter** total distance (12.24 km vs 13.92 km) and
+delivers **far less bandwidth** (63% vs 92%). Minimising cable to the exchange is the wrong
+objective - what matters is sitting near the *demand*, because that is what decides how much
+traffic has to cross the backbone at all. Hence the load weighting on the median.
 
 ## Stage 5: what the A* heuristic buys
 

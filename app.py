@@ -19,6 +19,10 @@ with st.sidebar:
     seed = st.number_input("Seed", 0, 999, 0)
     limit = st.slider("Exact solver time limit (s)", 5, 60, 20)
     extra = st.slider("Redundant backbone links", 0, 5, 2)
+    exch_mode = st.radio("Exchange placement", ["median", "center", "centroid"], horizontal=True,
+                         help="median: least total road distance to the towers, weighted by "
+                              "customer load. center: least worst-case distance. centroid: the "
+                              "original rule, nearest the geometric middle, ignores the roads.")
     redundancy = st.radio("Redundancy placement", ["bridges", "cheapest"], horizontal=True,
                           help="bridges: spend each link where it removes a single point of "
                                "failure. cheapest: the globally cheapest links, which may leave "
@@ -61,8 +65,10 @@ if run:
     dem, unserved = P.assign_customers_flow(G, C, D, sites, caps, mbps)
     total_demand = sum(d["w"] for d in D) * mbps
     edges, cable, dm = P.backbone(G, towers, extra, strategy=redundancy)
-    xs = [G.nodes[t]["x"] for t in towers]; ys = [G.nodes[t]["y"] for t in towers]
-    exch = min(range(len(sites)), key=lambda i: (xs[i] - sum(xs) / len(xs)) ** 2 + (ys[i] - sum(ys) / len(ys)) ** 2)
+    xy = [(G.nodes[t]["x"], G.nodes[t]["y"]) for t in towers]
+    exch = P.choose_exchange(dm, exch_mode, load=dem, xy=xy)
+    exch_compare = {m: P.choose_exchange(dm, m, load=dem, xy=xy)
+                    for m in ("median", "center", "centroid")}
     spof = P.bridges(len(sites), [(i, j) for i, j, _ in edges])
     net = P.build_flow_network(caps, edges, dem, exch)
     flow, cut = P.edmonds_karp(net, "EX", "SINK")
@@ -73,7 +79,8 @@ if run:
                                  spends=spends, dropped=dropped, comps_dropped=comps_dropped,
                                  dem_greedy=dem_greedy, unserved=unserved,
                                  total_demand=total_demand, spof=spof, extra=extra,
-                                 redundancy=redundancy)
+                                 redundancy=redundancy, dm=dm, exch_compare=exch_compare,
+                                 exch_mode=exch_mode)
 
 r = st.session_state.get("r")
 if not r:
@@ -206,6 +213,17 @@ st.caption(f"{len(r['edges'])} links = {len(r['sites']) - 1} spanning-tree links
            f"redundant, placed by the **{r['redundancy']}** rule. A spanning tree alone is all "
            f"bridges by definition, so redundancy is the only thing that removes them. Found with "
            f"Tarjan's DFS low-link algorithm, O(V+E).")
+
+st.subheader("Stage 3: where to put the exchange")
+_dm = r["dm"]
+st.table([{"rule": mode + (" (in use)" if mode == r["exch_mode"] else ""),
+           "picks": f"T{i}",
+           "total road distance": f"{sum(_dm[i]) / 1000:.2f} km",
+           "worst single hop": f"{max(_dm[i]) / 1000:.2f} km"}
+          for mode, i in r["exch_compare"].items()])
+st.caption("The exchange must sit at a tower, so 1-median and 1-center are solvable exactly by "
+           "enumerating the k candidates - unlike general k-median, which is NP-hard. The original "
+           "`centroid` rule ignores the road network, which is why it can lose on both measures.")
 
 # ---- stage 4 ----
 st.subheader("Stage 4: bottleneck (min-cut)")

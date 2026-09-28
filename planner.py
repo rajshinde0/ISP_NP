@@ -510,6 +510,42 @@ def backbone(G, tower_nodes, extra_links=0, strategy="bridges", dm=None):
     return edges, sum(e[2] for e in edges), dm
 
 
+def choose_exchange(dm, mode="median", load=None, xy=None):
+    """Pick which built tower hosts the exchange (the head-end where upstream fibre lands).
+
+    Free given `dm` from backbone() - no extra Dijkstras. O(k^2).
+
+      "median"   1-median: minimise the total road distance to every other tower, weighted by each
+                 tower's customer load when `load` is given, so the head-end sits near the demand
+                 rather than merely near the geometric middle of the towers. This is the right
+                 default: total distance is what backhaul actually costs.
+      "center"   1-center: minimise the WORST distance to any tower, i.e. bound the latency of the
+                 unluckiest customer rather than the average.
+      "centroid" the original rule - the tower nearest the Euclidean centroid of the tower
+                 positions. Kept for comparison; needs `xy` as a list of (x, y). It ignores the
+                 road network entirely, which is why it can be beaten on both of the above.
+
+    Note both 1-median and 1-center here are restricted to *tower* sites, which is the real
+    constraint (the exchange has to live at a tower), and are therefore exactly solvable by
+    enumeration - unlike the general k-median problem, which is NP-hard.
+    """
+    k = len(dm)
+    if k == 0:
+        raise ValueError("no towers to host an exchange")
+    if mode == "median":
+        w = load if load is not None else [1] * k
+        return min(range(k), key=lambda i: sum(dm[i][j] * w[j] for j in range(k)))
+    if mode == "center":
+        return min(range(k), key=lambda i: max(dm[i]))
+    if mode == "centroid":
+        if xy is None:
+            raise ValueError("mode='centroid' needs xy=[(x, y), ...]")
+        cx = sum(p[0] for p in xy) / k
+        cy = sum(p[1] for p in xy) / k
+        return min(range(k), key=lambda i: (xy[i][0] - cx) ** 2 + (xy[i][1] - cy) ** 2)
+    raise ValueError(f"unknown exchange mode {mode!r}")
+
+
 def _redundant_links(dm, k, tree_edges, extra_links, strategy):
     """Pick `extra_links` links beyond the spanning tree. See backbone() for the strategies."""
     used = {frozenset(e[:2]) for e in tree_edges}
@@ -743,7 +779,10 @@ if __name__ == "__main__":
     print("stage 2 caps  ", caps)
     print("stage 2 spend ", spends, "= %.1f k$ equipment on top of %.1f k$ build" % (sum(spends), e["cost"]))
     edges, total, dm = backbone(G, towers, extra_links=2)
-    cap = build_flow_network(caps, edges, dem, 0)
+    exch = choose_exchange(dm, "median", load=dem)
+    print("exchange  T%d (1-median; total %.2f km, worst %.2f km)"
+          % (exch, sum(dm[exch]) / 1000, max(dm[exch]) / 1000))
+    cap = build_flow_network(caps, edges, dem, exch)
     flow, cut = edmonds_karp(cap, "EX", "SINK")
     rows, links, nodes = describe_cut(cut)
     print("cable m", round(total), "| flow", flow, "of demand", sum(dem),

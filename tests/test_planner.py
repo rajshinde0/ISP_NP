@@ -355,6 +355,109 @@ def test_backbone_returns_a_reusable_distance_matrix(graph):
     assert again == edges and total2 == pytest.approx(total)
 
 
+# ---------------- Stage 3: exchange placement ----------------
+# T0 hugs a tight cluster but is stranded far from T5; T1 is middling from everyone. So the
+# minimum-TOTAL tower and the minimum-WORST-HOP tower are different, which is what makes this
+# matrix able to tell `sum` and `max` apart. Row sums: 93, 158, 97, 97, 97, 278 -> median picks T0.
+# Row maxima:     60,  35,  61,  61,  61,  61 -> center picks T1.
+_DM_SPLIT = [
+    [0, 30, 1, 1, 1, 60],
+    [30, 0, 31, 31, 31, 35],
+    [1, 31, 0, 2, 2, 61],
+    [1, 31, 2, 0, 2, 61],
+    [1, 31, 2, 2, 0, 61],
+    [60, 35, 61, 61, 61, 0],
+]
+
+
+def test_choose_exchange_median_minimises_total_not_worst_distance():
+    """Brute-forced against the definition, on a matrix where sum and max disagree - otherwise
+    a median that secretly computed max would pass."""
+    assert P.choose_exchange(_DM_SPLIT, "median") == 0
+    assert P.choose_exchange(_DM_SPLIT, "median") == min(
+        range(6), key=lambda i: sum(_DM_SPLIT[i]))
+    assert P.choose_exchange(_DM_SPLIT, "median") != min(
+        range(6), key=lambda i: max(_DM_SPLIT[i])), "this matrix must separate the two rules"
+
+
+def test_choose_exchange_center_minimises_the_worst_hop_not_the_total():
+    assert P.choose_exchange(_DM_SPLIT, "center") == 1
+    assert P.choose_exchange(_DM_SPLIT, "center") == min(
+        range(6), key=lambda i: max(_DM_SPLIT[i]))
+    assert P.choose_exchange(_DM_SPLIT, "center") != min(
+        range(6), key=lambda i: sum(_DM_SPLIT[i]))
+
+
+def test_choose_exchange_median_and_center_really_disagree():
+    """Otherwise offering both modes would be pointless. The previous version of this test used a
+    symmetric matrix where both rules picked the same tower, making every assertion vacuous."""
+    med = P.choose_exchange(_DM_SPLIT, "median")
+    cen = P.choose_exchange(_DM_SPLIT, "center")
+    assert med != cen
+    assert sum(_DM_SPLIT[med]) < sum(_DM_SPLIT[cen]), "median must win on total"
+    assert max(_DM_SPLIT[cen]) < max(_DM_SPLIT[med]), "center must win on worst hop"
+
+
+def test_choose_exchange_load_weighting_moves_the_pick():
+    """Unweighted the median sits with the cluster; weight the demand onto the far tower and it
+    must follow the load there."""
+    unweighted = P.choose_exchange(_DM_SPLIT, "median")
+    load = [1, 1, 1, 1, 1, 50]                      # nearly all customers at the far tower
+    weighted = P.choose_exchange(_DM_SPLIT, "median", load=load)
+    brute = min(range(6), key=lambda i: sum(_DM_SPLIT[i][j] * load[j] for j in range(6)))
+    assert weighted == brute
+    assert weighted != unweighted, "the load weighting had no effect"
+
+
+def test_choose_exchange_centroid_reproduces_the_rule_it_replaced(graph):
+    """Regression against the inline expression that used to live in app.py, so swapping in
+    choose_exchange cannot silently change the comparison baseline."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    xy = [(graph.nodes[t]["x"], graph.nodes[t]["y"]) for t in towers]
+    xs = [p[0] for p in xy]; ys = [p[1] for p in xy]
+    old = min(range(len(towers)),
+              key=lambda i: (xs[i] - sum(xs) / len(xs)) ** 2 + (ys[i] - sum(ys) / len(ys)) ** 2)
+    dm = P.road_distance_matrix(graph, towers)
+    assert P.choose_exchange(dm, "centroid", xy=xy) == old
+
+
+def test_choose_exchange_beats_the_centroid_rule_on_deliverable_bandwidth(graph):
+    """The result that justifies the feature. The centroid rule here picks a *shorter* total
+    distance yet delivers far less bandwidth, because what matters is sitting near the demand,
+    not near the geometric middle of the towers."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    sites = P.exact_cover(C, D, 20)["sites"]
+    towers = [C[i]["node"] for i in sites]
+    cust = P.assign_customers(graph, C, D, sites)
+    caps, _, _ = P.equip_towers(C, sites, [cust[k] * 5 for k in range(len(sites))], 12)
+    dem, _ = P.assign_customers_flow(graph, C, D, sites, caps, 5)
+    edges, _, dm = P.backbone(graph, towers, 2)
+    xy = [(graph.nodes[t]["x"], graph.nodes[t]["y"]) for t in towers]
+    flows = {}
+    for mode in ("median", "centroid"):
+        e = P.choose_exchange(dm, mode, load=dem, xy=xy)
+        net = P.build_flow_network(caps, edges, dem, e)
+        flows[mode], _ = P.edmonds_karp(net, "EX", "SINK")
+    assert flows["median"] > flows["centroid"], f"expected the median to win, got {flows}"
+
+
+def test_choose_exchange_rejects_bad_input():
+    dm = [[0, 1], [1, 0]]
+    with pytest.raises(ValueError, match="unknown exchange mode"):
+        P.choose_exchange(dm, "nonsense")
+    with pytest.raises(ValueError, match="needs xy"):
+        P.choose_exchange(dm, "centroid")
+    with pytest.raises(ValueError, match="no towers"):
+        P.choose_exchange([], "median")
+
+
+def test_choose_exchange_handles_a_single_tower():
+    assert P.choose_exchange([[0.0]], "median") == 0
+    assert P.choose_exchange([[0.0]], "center") == 0
+    assert P.choose_exchange([[0.0]], "centroid", xy=[(5.0, 5.0)]) == 0
+
+
 # ---------------- Stage 4: Edmonds-Karp ----------------
 def _to_digraph(cap):
     G = nx.DiGraph()
