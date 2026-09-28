@@ -242,6 +242,108 @@ def test_backbone_extra_links_add_cycles(graph):
     assert len(pairs) == len(set(pairs))                          # no duplicated link
 
 
+# ---------------- Stage 3: union-find and Kruskal ----------------
+def test_union_find_matches_a_naive_reference():
+    """Path compression and union by rank must not change *which* elements are connected, only
+    how fast the answer comes back."""
+    rng = random.Random(0)
+    for _ in range(400):
+        n = rng.randint(2, 12)
+        uf = P.UnionFind(n)
+        groups = {i: {i} for i in range(n)}
+        for _ in range(rng.randint(0, 15)):
+            a, b = rng.randrange(n), rng.randrange(n)
+            ga = next(g for g in groups.values() if a in g)
+            gb = next(g for g in groups.values() if b in g)
+            expected_merge = ga is not gb
+            assert uf.union(a, b) == expected_merge, "union must report whether it merged"
+            if expected_merge:
+                ga |= gb
+                for x in gb:
+                    groups[x] = ga
+        for i in range(n):
+            for j in range(n):
+                naive = next(g for g in groups.values() if i in g) is                         next(g for g in groups.values() if j in g)
+                assert (uf.find(i) == uf.find(j)) == naive
+        distinct = len({id(next(g for g in groups.values() if i in g)) for i in range(n)})
+        assert uf.components == distinct
+
+
+def test_union_find_compresses_paths():
+    """Build a deliberate chain, then one find must flatten it. Without compression the parent
+    pointers stay a chain and repeated finds stay linear."""
+    uf = P.UnionFind(6)
+    for i in range(5):
+        uf.parent[i] = i + 1            # hand-built chain 0 -> 1 -> ... -> 5
+    assert uf.find(0) == 5
+    assert all(uf.parent[i] == 5 for i in range(5)), "find() must point every node at the root"
+
+
+def test_union_find_is_idempotent_on_an_existing_pair():
+    uf = P.UnionFind(3)
+    assert uf.union(0, 1) is True
+    assert uf.union(1, 0) is False, "already joined"
+    assert uf.components == 2
+
+
+def test_kruskal_total_equals_prim_and_networkx(graph):
+    """The MST weight is unique even where the tree is not, so assert on weight, not edge sets."""
+    for seed in range(5):
+        D, C, _ = P.make_instance(graph, 60, 20, seed)
+        towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+        dm = P.road_distance_matrix(graph, towers)
+        k = len(towers)
+        _, prim_total = P.prim(dm)
+        kr_edges, kr_total = P.kruskal(dm)
+        K = nx.Graph()
+        for i in range(k):
+            for j in range(i + 1, k):
+                K.add_edge(i, j, weight=dm[i][j])
+        ref = nx.minimum_spanning_tree(K, weight="weight").size(weight="weight")
+        assert kr_total == pytest.approx(prim_total, rel=1e-9)
+        assert kr_total == pytest.approx(ref, rel=1e-9)
+        assert len(kr_edges) == k - 1
+
+
+def test_kruskal_output_is_a_spanning_tree(graph):
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    edges, _ = P.kruskal(P.road_distance_matrix(graph, towers))
+    T = nx.Graph([(i, j) for i, j, _ in edges])
+    assert T.number_of_nodes() == len(towers)
+    assert nx.is_connected(T) and nx.is_tree(T)
+
+
+def test_kruskal_takes_edges_in_nondecreasing_order(graph):
+    """The defining property of the algorithm, distinct from Prim's grow-one-tree strategy."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    edges, _ = P.kruskal(P.road_distance_matrix(graph, towers))
+    lengths = [d for _, _, d in edges]
+    assert lengths == sorted(lengths)
+
+
+def test_kruskal_on_a_hand_built_matrix_picks_the_known_tree():
+    dm = [[0, 1, 5, 9], [1, 0, 2, 8], [5, 2, 0, 3], [9, 8, 3, 0]]
+    edges, total = P.kruskal(dm)
+    assert total == pytest.approx(1 + 2 + 3)
+    assert {frozenset(e[:2]) for e in edges} == {
+        frozenset({0, 1}), frozenset({1, 2}), frozenset({2, 3})}
+
+
+def test_backbone_gives_the_same_length_with_either_mst(graph):
+    """Which algorithm runs is a demonstration, not a decision - the cable bill is identical."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    dm = P.road_distance_matrix(graph, towers)
+    for extra in (0, 2):
+        _, a, _ = P.backbone(graph, towers, extra, dm=dm, mst="prim")
+        _, b, _ = P.backbone(graph, towers, extra, dm=dm, mst="kruskal")
+        assert a == pytest.approx(b, rel=1e-9)
+    with pytest.raises(ValueError, match="unknown mst algorithm"):
+        P.backbone(graph, towers, 0, dm=dm, mst="nonsense")
+
+
 # ---------------- Stage 3: bridges (Tarjan / DFS) ----------------
 def test_bridges_matches_networkx_on_random_graphs():
     rng = random.Random(0)

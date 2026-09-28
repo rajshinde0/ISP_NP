@@ -42,7 +42,8 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | 1 | ...and the true optimum | Backtracking + branch and bound (`exact_cover`) | O(2^\|C\|) worst case | IV + VI |
 | 2 | Equipment per tower under budget | 0/1 knapsack DP (`knapsack`, `equip_towers`) | O(n · B) per tower | III |
 | 2b | Assign customers within capacity | Max-flow on a bipartite network (`assign_customers_flow`) | O(V · E²) | V |
-| 3 | Wire towers with least cable | Prim MST over the road-distance metric closure (`backbone`) | k Dijkstras + O(k²) | II / IV |
+| 3 | Wire towers with least cable | Prim MST over the road-distance metric closure (`prim`) | k Dijkstras + O(k²) | II / IV |
+| 3 | ...or the same tree, the other way | Kruskal + union-find (`kruskal`, `UnionFind`) | O(k² log k), sort-dominated | II / IV |
 | 3 | Find single points of failure | Tarjan bridge-finding by DFS low-link (`bridges`) | O(V+E) | I |
 | 3 | Site the exchange | 1-median / 1-center over the tower set (`choose_exchange`) | O(k²) | IV |
 | 4 | Push bandwidth from exchange, find bottleneck | Edmonds–Karp max-flow / min-cut (`edmonds_karp`) | O(V · E²) | V |
@@ -206,6 +207,12 @@ independent oracle:
 | `dijkstra` | `nx.dijkstra_path_length`, plus the path is re-walked and its lengths re-summed |
 | `backbone` | `nx.minimum_spanning_tree` on the same metric closure, built from our own distances |
 | `edmonds_karp` | `nx.maximum_flow_value` over 300 random networks, plus CLRS fig. 26.1, plus max-flow = min-cut |
+| `kruskal`, `prim` | each other and `nx.minimum_spanning_tree` on the same closure (weight, not edge set - the MST weight is unique where the tree is not) |
+| `UnionFind` | a naive set-of-sets reference over 400 random union sequences |
+| `bridges` | `nx.bridges` over 300 random graphs, plus path / cycle / barbell |
+| `astar` | `dijkstra` and `nx.dijkstra_path_length`, plus the no-re-expansion invariant |
+| `assign_customers_flow` | `nx.maximum_flow_value` on the same bipartite network |
+| `choose_exchange` | brute force over all k candidates, on a matrix where sum and max disagree |
 | `knapsack` | exhaustive subset search |
 | `exact_cover` | exhaustive subset search, and the unpruned search |
 | `greedy_cover` | its own (ln n + 1) guarantee, and a hand-built instance that separates cost-weighted from unweighted selection |
