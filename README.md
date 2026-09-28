@@ -30,9 +30,11 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | `bench.py` | both | Stage-1 benchmark CLI; writes the report's CSV/PNG/Markdown |
 | `tests/` | both | Correctness tests against NetworkX and brute force |
 | `docs/report.md` | both | Milestone 7: the final report (source) |
-| `docs/ISP_Network_Planner_Report.docx` | both | The same report, submittable |
+| `docs/ISP_Network_Planner_Report.docx` | both | The same report, as Word |
+| `docs/ISP_Network_Planner_Report.pdf` | both | The same report, as PDF (12 pages, A4) |
 | `docs/np-hardness.md` | both | Milestone 7: the NP-hardness writeup |
 | `tools/md2docx.js` | both | Regenerates the .docx from the markdown (`npm run report`) |
+| `tools/make_pdf.py` | both | Regenerates the PDF via Chrome's print engine |
 
 `interface.py` is the artifact to check at every sync. Read it before changing any stage.
 
@@ -294,9 +296,19 @@ strategy said instead of a traceback, and the synthetic grid always works offlin
 
 ## The report
 
-[`docs/report.md`](docs/report.md) is the final report; `docs/ISP_Network_Planner_Report.docx` is
-the same document in submittable form. Edit the markdown and run `npm run report` to regenerate the
-Word version (`npm install` once first).
+[`docs/report.md`](docs/report.md) is the final report. The same document ships as
+`ISP_Network_Planner_Report.docx` and `ISP_Network_Planner_Report.pdf` (12 pages, A4), both in
+`docs/`. The markdown is the source of truth - edit it, then regenerate:
+
+```
+python tools/make_pdf.py      # PDF, via Chrome's print engine (no pandoc or LaTeX needed)
+npm install && npm run report # .docx, via docx-js
+```
+
+The PDF route uses Chrome because it is the one engine present on a typical Windows machine; it is
+also how the original plan-of-action PDF was made. Note it carries no page numbers, since Chrome's
+CLI can only add them alongside a file:// URL stamp. If you need them, export the .docx from Word
+instead.
 
 ## Still to do
 
