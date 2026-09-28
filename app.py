@@ -2,6 +2,7 @@ import folium, streamlit as st
 import matplotlib.pyplot as plt
 from streamlit_folium import st_folium
 import planner as P
+import bench
 
 st.set_page_config(page_title="ISP Network Planner", layout="wide")
 st.title("ISP Network Planner")
@@ -145,31 +146,9 @@ if st.button("Run benchmark"):
     rows = P.benchmark(G, n_demand=n_d, seed=seed, limit=limit,
                        progress=lambda f, n: bar.progress(f, text=f"|C| = {n} done"))
     bar.empty()
-    ns = [x["n_cand"] for x in rows]
-    fig, ax = plt.subplots(1, 2, figsize=(10, 3.4))
-    for key, style, lab in (("naive", "^-", "naive backtracking"), ("bb", "o-", "exact (B&B)"),
-                            ("greedy", "s--", "greedy")):
-        ax[0].semilogy(ns, [x[key]["runtime_s"] + 1e-6 for x in rows], style, label=lab)
-    # ring the truncated searches: a timed-out run is NOT the optimum and must not be read as one
-    to = [(x["n_cand"], x[k]["runtime_s"] + 1e-6) for x in rows for k in ("naive", "bb")
-          if x[k].get("timed_out")]
-    if to:
-        ax[0].plot([p[0] for p in to], [p[1] for p in to], "o", ms=14, mfc="none", mec="red", mew=2,
-                   label="hit time limit (NOT optimal)")
-    ax[0].set_xlabel("|C| candidate sites"); ax[0].set_ylabel("seconds"); ax[0].set_title("runtime (log)")
-    ax[0].legend(fontsize=7)
-    ax[1].plot(ns, [x["bb"]["cost"] for x in rows], "o-", label="exact (B&B)")
-    ax[1].plot(ns, [x["greedy"]["cost"] for x in rows], "s--", label="greedy")
-    ax[1].set_xlabel("|C| candidate sites"); ax[1].set_ylabel("total build cost (k$)")
-    ax[1].set_title("solution quality"); ax[1].legend(fontsize=7)
-    fig.tight_layout()
-    st.pyplot(fig)
-    st.table([{"|C|": x["n_cand"], "|D|": x["n_demand"],
-               "naive nodes": f"{x['naive']['nodes']:,}" + (" (timed out)" if x["naive"]["timed_out"] else ""),
-               "B&B nodes": f"{x['bb']['nodes']:,}",
-               "nodes saved": "-" if x["naive"]["timed_out"] else f"{x['naive']['nodes'] / max(1, x['bb']['nodes']):.0f}x",
-               "exact k$": x["bb"]["cost"], "greedy k$": x["greedy"]["cost"],
-               "greedy gap": f"{100 * (x['greedy']['cost'] - x['bb']['cost']) / max(1e-9, x['bb']['cost']):.1f}%"}
-              for x in rows])
-    st.caption("Naive cost is omitted from the quality panel: once it times out its incumbent is not an "
-               "optimum. Node counts are directly comparable - both modes run the identical recursion.")
+    # same plotting code the CLI uses, so the app chart and the report figure cannot drift apart
+    st.pyplot(bench.plot_benchmark(rows, plt))
+    st.table(bench.table_rows(rows))
+    st.caption("Naive cost is omitted from the quality panel: once it times out its incumbent is "
+               "not an optimum. Node counts are directly comparable - both modes run the identical "
+               "recursion. `python bench.py` writes these same figures plus a CSV for the report.")

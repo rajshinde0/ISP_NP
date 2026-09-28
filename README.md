@@ -2,7 +2,7 @@
 
 Plans a mobile/internet network for a city: which towers to build, what equipment to put on
 them, how to wire them together, and where the bandwidth bottleneck ends up. Every algorithm is
-hand-written; NetworkX is only a graph container and a correctness reference.
+hand-written; NetworkX is only a graph container and a correctness oracle for the tests.
 
 ## Run in VS Code
 
@@ -15,6 +15,8 @@ hand-written; NetworkX is only a graph container and a correctness reference.
    ```
 3. Quick console test: `python planner.py`
 4. Full app: `streamlit run app.py`
+5. Tests: `pytest -q`
+6. Report figures: `python bench.py`
 
 Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place" when online.
 
@@ -25,6 +27,8 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | `interface.py` | both | The locked A/B data contract (plan Section 3) + all tunable constants |
 | `planner.py` | A (stages 0-2), B (stages 3-5) | Every algorithm |
 | `app.py` | B | Stage 6: Streamlit + Folium dashboard |
+| `bench.py` | both | Stage-1 benchmark CLI; writes the report's CSV/PNG/Markdown |
+| `tests/` | both | Correctness tests against NetworkX and brute force |
 
 `interface.py` is the artifact to check at every sync. Read it before changing any stage.
 
@@ -43,29 +47,66 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 
 ## Stage 1 is the headline: measured results
 
-`|D|=60`, seed 0, synthetic grid, 5 s limit. Naive backtracking is the *identical recursion* with
-every bound removed, so the node counts are directly comparable.
+Produced by `python bench.py` (`bench/stage1_scaling.csv`). 60 demand points requested, seed 0,
+synthetic grid, 20 s limit. Naive backtracking is the *identical recursion* with every bound
+removed, so node counts are directly comparable.
 
-| \|C\| | naive nodes | B&B nodes | nodes saved | exact k$ | greedy k$ | greedy gap |
-|---|---|---|---|---|---|---|
-| 8 | 511 | 22 | 23× | 67.26 | 67.26 | 0.0% |
-| 12 | 8,191 | 38 | 216× | 76.61 | 84.72 | 10.6% |
-| 16 | 127,935 | 85 | 1,505× | 77.40 | 91.16 | 17.8% |
-| 20 | 1,946,815 | 456 | 4,269× | 80.93 | 110.24 | 36.2% |
-| 24 | 10,047,287 **(timed out)** | 676 | — | 77.31 | 85.41 | 10.5% |
-| 28 | 9,676,189 **(timed out)** | 572 | — | 74.14 | 96.24 | 29.8% |
+| \|C\| | \|D\| | naive nodes | naive s | B&B nodes | B&B s | nodes saved | exact k$ | greedy k$ | greedy gap |
+|---|---|---|---|---|---|---|---|---|---|
+| 8 | 44 | 511 | 0.0002 | 22 | 0.0001 | 23× | 67.26 | 67.26 | 0.0% |
+| 12 | 60 | 8,191 | 0.004 | 38 | 0.0002 | 216× | 76.61 | 84.72 | 10.6% |
+| 16 | 57 | 127,935 | 0.052 | 85 | 0.0005 | 1,505× | 77.40 | 91.16 | 17.8% |
+| 20 | 60 | 1,946,815 | 0.850 | 456 | 0.0030 | 4,269× | 80.93 | 110.24 | 36.2% |
+| 24 | 60 | 30,799,999 | 13.13 | 676 | 0.0040 | 45,562× | 77.31 | 85.41 | 10.5% |
+| 28 | 60 | 46,284,591 **(timed out)** | 20.0 | 572 | 0.0053 | — | 74.14 | 96.24 | 29.8% |
 
-Two things for the report and the viva:
+Four things for the report and the viva:
 
-- **Naive backtracking hits the 2ⁿ wall at |C| = 24**, which is the plan's "stalls past ~15–20
-  candidate sites" claim. Branch and bound stays under 5 ms up to |C| = 28 and under 0.12 s at
-  |C| = 40 (8,142 nodes, measured). Pruning is not optional — it is the difference between a live
-  demo and a hang.
-- **The pruning is lossless.** Verified over 18 instances (6 seeds × |C| = 10/14/16): `prune=False`
-  finds exactly the same optimal cost as `prune=True`, using 2,000–131,000 nodes instead of
-  22–242. The bounds cut only branches that provably cannot improve the incumbent.
+- **Naive backtracking grows about 16× per four extra candidates** — that is 2⁴, the textbook 2ⁿ
+  curve — and hits the 20 s wall at |C| = 28. This is the plan's "stalls past ~15–20 candidate
+  sites" claim. Where exactly the wall falls depends on the time limit: at a 5 s limit it already
+  fails at |C| = 24.
+- **Branch and bound never stalls.** Under 6 ms through |C| = 28, and 0.12 s at |C| = 40. Pruning
+  is not optional — it is the difference between a live demo and a hang.
+- **A timed-out search is not an optimum, and this table proves it.** At |C| = 28 naive's truncated
+  incumbent is 86.32 k$ while B&B proves the optimum is 74.14 k$. The chart rings such points in
+  red for exactly this reason.
+- **The pruning is lossless.** `test_pruning_is_lossless` checks that `prune=False` reaches the
+  same optimal cost as `prune=True` across 8 instances. The bounds cut only branches that provably
+  cannot improve the incumbent.
 
 Greedy is strictly costlier than the optimum on 8 of 10 seeds, by up to 62%.
+
+## Tests
+
+```
+pytest -q                      # everything (46 tests, ~4 s)
+pytest tests/test_planner.py    # algorithms only, under 1 s
+```
+
+"It runs" is not evidence for hand-written algorithms, so each one is checked against an
+independent oracle:
+
+| Algorithm | Oracle |
+|---|---|
+| `components`, `largest_component` | `nx.connected_components` (the partition, not just the count) |
+| `dijkstra` | `nx.dijkstra_path_length`, plus the path is re-walked and its lengths re-summed |
+| `backbone` | `nx.minimum_spanning_tree` on the same metric closure, built from our own distances |
+| `edmonds_karp` | `nx.maximum_flow_value` over 300 random networks, plus CLRS fig. 26.1, plus max-flow = min-cut |
+| `knapsack` | exhaustive subset search |
+| `exact_cover` | exhaustive subset search, and the unpruned search |
+| `greedy_cover` | its own (ln n + 1) guarantee, and a hand-built instance that separates cost-weighted from unweighted selection |
+
+`tests/test_app.py` runs the dashboard headlessly through Streamlit's `AppTest`, so a crash in the
+sidebar, metric row, Folium map or min-cut table fails a test instead of surfacing as a red box
+during the demo.
+
+The suite was validated by mutation testing — ten deliberate bugs were injected into `planner.py`
+(reversed Prim comparison, dropped residual reverse edge, off-by-one in the knapsack budget, a
+broadcast stage-2 capacity, and so on) and **all ten were caught**. Three of them survived the
+first draft of the suite; the tests that now catch them were added in response, including a
+randomly-discovered 6-node network where omitting the residual reverse edge silently returns
+flow 7 instead of 9.
 
 ## Deliberate deviations from the plan of action
 
@@ -111,11 +152,7 @@ together — changing one in isolation will make a stage look broken:
 
 ## Still to do
 
-- **No version control.** The plan names format drift between A and B as risk #1 and mandates
-  syncs every 2–3 days. `git init` and push before the next sync.
-- **No test suite.** The hand-written algorithms should be checked against NetworkX references
-  (`nx.minimum_spanning_tree`, `nx.maximum_flow`, `nx.dijkstra_path_length`) and the exact solver
-  against brute force on small instances. Right now only Dijkstra is verified, at the bottom of
-  `planner.py`.
-- Milestone 7 wants saved benchmark artifacts (CSV/PNG) for the report; `benchmark()` returns the
-  rows but nothing writes them to disk.
+- **A* for stage 5**, to give the plan's "Dijkstra / A*" comparison a second data point.
+- **OpenStreetMap path is untested.** Everything above was verified on the synthetic grid;
+  `osm_graph` needs a live network and has no test coverage.
+- Wire `bench.py` output into the final report document.

@@ -1,0 +1,7 @@
+n_cand,n_demand,naive_cost,naive_runtime_s,naive_nodes,naive_coverage_pct,naive_timed_out,bb_cost,bb_runtime_s,bb_nodes,bb_coverage_pct,bb_timed_out,greedy_cost,greedy_runtime_s,greedy_nodes,greedy_coverage_pct,greedy_timed_out
+8,44,67.26,0.000204,511,100.0,False,67.26,0.000138,22,100.0,False,67.26,0.000062,,100.0,
+12,60,76.61,0.003727,8191,100.0,False,76.61,0.000215,38,100.0,False,84.72,0.000069,,100.0,
+16,57,77.4,0.051865,127935,100.0,False,77.4,0.000513,85,100.0,False,91.16,0.000092,,100.0,
+20,60,80.93,0.850399,1946815,100.0,False,80.93,0.002983,456,100.0,False,110.24,0.000104,,100.0,
+24,60,77.31,13.133479,30799999,100.0,False,77.31,0.004021,676,100.0,False,85.41,0.000108,,100.0,
+28,60,86.32,20.000188,46284591,100.0,True,74.14,0.005282,572,100.0,False,96.24,0.000118,,100.0,
