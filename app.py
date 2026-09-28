@@ -9,7 +9,11 @@ st.title("ISP Network Planner")
 
 with st.sidebar:
     src = st.radio("Road network", ["Synthetic grid (offline)", "OpenStreetMap place"])
-    place = st.text_input("Place", "Kothrud, Pune, India") if src.startswith("Open") else None
+    place = st.text_input("Place", "Pune, India") if src.startswith("Open") else None
+    osm_dist = st.slider("OSM radius (m)", 1000, 8000, 3000,
+                         help="Used when the place name geocodes to a point rather than a "
+                              "boundary polygon. Also bounds the download so a broad query "
+                              "cannot hang the demo.") if src.startswith("Open") else 3000
     n_d = st.slider("Demand points", 20, 150, 60)
     n_c = st.slider("Candidate towers |C|", 8, 40, 20)
     seed = st.number_input("Seed", 0, 999, 0)
@@ -20,16 +24,25 @@ with st.sidebar:
     run = st.button("Plan network", type="primary")
 
 
-@st.cache_resource(show_spinner="Loading graph...")
-def load(src, place):
+@st.cache_resource(show_spinner="Loading graph (OpenStreetMap can take a minute)...")
+def load(src, place, osm_dist):
     # `src` is unused on purpose: it is here only so switching source invalidates the cache.
     # cache_resource, not cache_data - the latter deep-copies the whole graph on every rerun.
-    G = P.osm_graph(place) if place else P.synthetic_graph()
+    G = P.osm_graph(place, dist=osm_dist) if place else P.synthetic_graph()
     return P.largest_component(G)
 
 
 if run:
-    G, comps_dropped = load(src, place)
+    try:
+        G, comps_dropped = load(src, place, osm_dist)
+    except P.OsmFetchError as e:
+        # OSM has two separate services behind it and either can fail; show which, and let the
+        # user fall back to the offline grid rather than reading a traceback.
+        st.error(str(e))
+        st.stop()
+    except Exception as e:
+        st.error(f"Could not load the road network: {type(e).__name__}: {e}")
+        st.stop()
     D, C, dropped = P.make_instance(G, n_d, n_c, seed)
     ex, gr = P.exact_cover(C, D, limit), P.greedy_cover(C, D)
     sites = ex["sites"]

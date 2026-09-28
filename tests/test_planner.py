@@ -368,8 +368,14 @@ def test_greedy_is_never_better_than_exact_and_honours_its_bound(graph):
         D, C, _ = instance(graph, n_cand=14, seed=seed)
         ex, gr = P.exact_cover(C, D, 20), P.greedy_cover(C, D)
         assert gr["cost"] >= ex["cost"] - 1e-6, "greedy beat the optimum: one of them is wrong"
-        bound = (math.log(len(D)) + 1) * ex["cost"]
-        assert gr["cost"] <= bound + 1e-6, "greedy exceeded its (ln n + 1)-approximation guarantee"
+        # Chvatal's bound is H(d) * OPT where d is the largest SET size. Our demand points carry
+        # integer weights and greedy ranks on weight-per-cost, which is the same algorithm on an
+        # instance where an element of weight w is w copies - so d is the largest set *weight*,
+        # not len(D). Using H(len(D)) here would be the unit-weight bound and is not guaranteed.
+        w = [d["w"] for d in D]
+        d_max = max(P.wmask(c["mask"], w) for c in C)
+        H = sum(1.0 / k for k in range(1, d_max + 1))
+        assert gr["cost"] <= H * ex["cost"] + 1e-6,             f"greedy exceeded its H(d)={H:.2f} approximation guarantee"
 
 
 def test_greedy_maximises_coverage_per_cost_not_raw_coverage():
@@ -473,3 +479,119 @@ def test_benchmark_progress_callback_fires(graph):
     P.benchmark(graph, sizes=(8, 9), n_demand=20, seed=0, limit=5,
                 progress=lambda f, n: seen.append((round(f, 2), n)))
     assert seen == [(0.5, 8), (1.0, 9)]
+
+
+# ---------------- Stage 0: the OpenStreetMap path ----------------
+# The network fetch itself cannot be tested offline, but everything around it can: the lat/lon
+# swap, the parallel-edge collapse, and the fallback chain are all ours and all deterministic.
+def _fake_osm_pair():
+    """An (unprojected, projected) MultiDiGraph pair shaped like what OSMnx hands back."""
+    G0 = nx.MultiDiGraph()                       # unprojected: x is LONGITUDE, y is LATITUDE
+    G0.add_node(1, x=73.85, y=18.52)
+    G0.add_node(2, x=73.86, y=18.53)
+    G0.add_node(3, x=73.87, y=18.51)
+    Gp = nx.MultiDiGraph()                       # projected: x/y in metres
+    Gp.add_node(1, x=1000.0, y=2000.0)
+    Gp.add_node(2, x=1500.0, y=2400.0)
+    Gp.add_node(3, x=2000.0, y=1800.0)
+    Gp.add_edge(1, 2, length=700.0)
+    Gp.add_edge(2, 1, length=640.0)              # opposite direction, shorter -> should win
+    Gp.add_edge(1, 2, length=900.0)              # parallel edge, longer -> should lose
+    Gp.add_edge(2, 3, length=800.0)
+    Gp.add_edge(3, 3, length=50.0)               # self-loop -> should be dropped
+    return G0, Gp
+
+
+def test_flatten_projected_keeps_lat_and_lon_the_right_way_round():
+    """OSMnx stores x=lon, y=lat. Swapping them is silent and puts every tower in the sea."""
+    G0, Gp = _fake_osm_pair()
+    H = P._flatten_projected(Gp, G0)
+    assert H.nodes[1]["lat"] == pytest.approx(18.52)
+    assert H.nodes[1]["lon"] == pytest.approx(73.85)
+    assert 18.0 < H.nodes[2]["lat"] < 19.0 and 73.0 < H.nodes[2]["lon"] < 74.0
+
+
+def test_flatten_projected_uses_metric_coordinates_for_x_y():
+    """Coverage radii are in metres, so x/y must come from the projected graph, not degrees."""
+    G0, Gp = _fake_osm_pair()
+    H = P._flatten_projected(Gp, G0)
+    assert H.nodes[1]["x"] == pytest.approx(1000.0)
+    assert H.nodes[1]["y"] == pytest.approx(2000.0)
+
+
+def test_flatten_projected_collapses_parallel_edges_to_the_shortest():
+    G0, Gp = _fake_osm_pair()
+    H = P._flatten_projected(Gp, G0)
+    assert not H.is_directed()
+    assert H[1][2]["length"] == pytest.approx(640.0), "must keep the cheapest of the three arcs"
+    assert H[2][3]["length"] == pytest.approx(800.0)
+
+
+def test_flatten_projected_drops_self_loops():
+    """A self-loop adds no connectivity and hands Prim a zero-cost edge to chew on."""
+    G0, Gp = _fake_osm_pair()
+    H = P._flatten_projected(Gp, G0)
+    assert not H.has_edge(3, 3)
+    assert H.number_of_nodes() == 3 and H.number_of_edges() == 2
+
+
+def test_flatten_projected_output_feeds_the_rest_of_the_pipeline():
+    """Whatever stage 0 returns must carry exactly the attributes stages 1-5 read."""
+    G0, Gp = _fake_osm_pair()
+    H = P._flatten_projected(Gp, G0)
+    for _, d in H.nodes(data=True):
+        assert {"x", "y", "lat", "lon"} <= set(d)
+    for _, _, d in H.edges(data=True):
+        assert "length" in d
+    d, path = P.dijkstra(H, 1, 3)
+    assert d == pytest.approx(1440.0) and path == [1, 2, 3]
+
+
+def test_osm_graph_falls_back_to_address_when_place_has_no_polygon(monkeypatch):
+    """The real-world failure: Nominatim returns a bare point for most neighbourhood names and
+    graph_from_place rejects it. The address+radius strategy must pick up the slack."""
+    import osmnx as ox
+    G0, Gp = _fake_osm_pair()
+    calls = []
+
+    def no_polygon(*a, **k):
+        calls.append("place")
+        raise TypeError("Nominatim did not geocode query to a (Multi)Polygon")
+
+    def by_address(*a, **k):
+        calls.append("address")
+        return G0
+
+    monkeypatch.setattr(ox, "graph_from_place", no_polygon)
+    monkeypatch.setattr(ox, "graph_from_address", by_address)
+    monkeypatch.setattr(ox, "project_graph", lambda g: Gp)
+    H = P.osm_graph("Karve Nagar, Pune, India")
+    assert calls == ["place", "address"], "both strategies must be tried, in order"
+    assert H.number_of_nodes() == 3
+
+
+def test_osm_graph_skips_a_strategy_that_returns_an_empty_graph(monkeypatch):
+    """'Found no graph nodes within the requested polygon' comes back as an empty graph on some
+    osmnx paths rather than an exception; that must still fall through to the next strategy."""
+    import osmnx as ox
+    G0, Gp = _fake_osm_pair()
+    monkeypatch.setattr(ox, "graph_from_place", lambda *a, **k: nx.MultiDiGraph())
+    monkeypatch.setattr(ox, "graph_from_address", lambda *a, **k: G0)
+    monkeypatch.setattr(ox, "project_graph", lambda g: Gp)
+    assert P.osm_graph("Kothrud, Pune, India").number_of_nodes() == 3
+
+
+def test_osm_graph_error_names_every_strategy_it_tried(monkeypatch):
+    """When everything fails the user must get something actionable, not a bare traceback."""
+    import osmnx as ox
+    monkeypatch.setattr(ox, "graph_from_place", lambda *a, **k: (_ for _ in ()).throw(
+        TypeError("did not geocode query to a (Multi)Polygon")))
+    monkeypatch.setattr(ox, "graph_from_address", lambda *a, **k: (_ for _ in ()).throw(
+        ConnectionError("overpass-api.de timed out")))
+    with pytest.raises(P.OsmFetchError) as excinfo:
+        P.osm_graph("Nowhere, Atlantis")
+    msg = str(excinfo.value)
+    assert "Nowhere, Atlantis" in msg
+    assert "graph_from_place" in msg and "graph_from_address" in msg
+    assert "(Multi)Polygon" in msg and "overpass" in msg
+    assert "synthetic grid" in msg, "the offline escape hatch must be suggested"

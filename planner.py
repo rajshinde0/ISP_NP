@@ -31,19 +31,73 @@ def synthetic_graph(n=25, spacing=150, seed=0):
     return G
 
 
-def osm_graph(place):
-    import osmnx as ox
-    G0 = ox.graph_from_place(place, network_type="drive")
-    Gp = ox.project_graph(G0)  # metres, not degrees
+class OsmFetchError(RuntimeError):
+    """No OSM strategy produced a usable road graph. Carries every attempt's reason so the
+    dashboard can show something actionable instead of a raw traceback."""
+
+
+def _flatten_projected(Gp, G0):
+    """Collapse an OSMnx MultiDiGraph pair into the simple undirected Graph the stages expect.
+
+    `Gp` is the projected graph (x/y in metres, for distance maths); `G0` is the same graph
+    unprojected, where x is longitude and y is latitude - note the swap, it is the easiest thing
+    to get backwards and it silently puts every tower in the wrong hemisphere.
+
+    Parallel edges collapse to the shortest, since a backbone only needs the cheapest link
+    between two intersections. Self-loops are dropped: they add no connectivity and would give
+    Prim a zero-length edge to chew on.
+    """
     H = nx.Graph()
     for n, d in Gp.nodes(data=True):
         H.add_node(n, x=d["x"], y=d["y"], lat=G0.nodes[n]["y"], lon=G0.nodes[n]["x"])
     for u, v, d in Gp.edges(data=True):
+        if u == v:
+            continue
         l = d["length"]
         if H.has_edge(u, v):
             l = min(l, H[u][v]["length"])
         H.add_edge(u, v, length=l)
     return H
+
+
+def osm_graph(place, dist=3000, network_type="drive"):
+    """Fetch a real road network for `place`, in metres, ready for every downstream stage.
+
+    Two strategies, in order:
+      1. graph_from_place - correct when the name geocodes to a real boundary polygon (a city or
+         an administrative district).
+      2. graph_from_address with a `dist` radius - needed because most *neighbourhood* names come
+         back from Nominatim as a bare point, and graph_from_place rejects anything that is not a
+         (Multi)Polygon. The radius also bounds the download, so a broad query cannot hang the
+         demo the way an unbounded city-wide fetch does.
+
+    Raises OsmFetchError listing what each strategy said. Needs network access: the geocoder
+    (Nominatim) and the road data (Overpass) are separate services, and Overpass is the slow one.
+    """
+    import osmnx as ox
+    attempts, G0 = [], None
+    strategies = (
+        ("graph_from_place", lambda: ox.graph_from_place(place, network_type=network_type)),
+        (f"graph_from_address(dist={dist}m)",
+         lambda: ox.graph_from_address(place, dist=dist, network_type=network_type)),
+    )
+    for name, fetch in strategies:
+        try:
+            G = fetch()
+        except Exception as e:                      # geocode miss, wrong geometry, network, ...
+            attempts.append(f"{name}: {type(e).__name__}: {e}")
+            continue
+        if G.number_of_nodes():
+            G0 = G
+            break
+        attempts.append(f"{name}: returned an empty graph")
+    if G0 is None:
+        raise OsmFetchError(
+            f"Could not build a road network for {place!r}.\n  "
+            + "\n  ".join(attempts)
+            + "\n\nTry a broader name (a city or district rather than a neighbourhood), "
+              "check the spelling, or use the synthetic grid offline.")
+    return _flatten_projected(ox.project_graph(G0), G0)
 
 
 def components(G):

@@ -29,6 +29,7 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | `app.py` | B | Stage 6: Streamlit + Folium dashboard |
 | `bench.py` | both | Stage-1 benchmark CLI; writes the report's CSV/PNG/Markdown |
 | `tests/` | both | Correctness tests against NetworkX and brute force |
+| `docs/np-hardness.md` | both | Milestone 7: the NP-hardness writeup |
 
 `interface.py` is the artifact to check at every sync. Read it before changing any stage.
 
@@ -76,6 +77,11 @@ Four things for the report and the viva:
   cannot improve the incumbent.
 
 Greedy is strictly costlier than the optimum on 8 of 10 seeds, by up to 62%.
+
+**[`docs/np-hardness.md`](docs/np-hardness.md)** works through why: the reduction from SET-COVER,
+why the hardness survives being restricted to disc coverage, Chvatal's H(d) bound with proof
+sketch, and the Feige / Dinur-Steurer result that puts greedy near the theoretical ceiling for
+any polynomial-time algorithm.
 
 ## Tests
 
@@ -150,9 +156,27 @@ together — changing one in isolation will make a stage look broken:
 - `HEADROOM` below ~1.5 → every tower is sized to exactly its own customers, leaving no transit
   capacity, and the backbone starves (stage 4 served 19% of demand at headroom 1.0).
 
+## OpenStreetMap: read this before demoing it
+
+`osm_graph` tries two strategies. `graph_from_place` works when the name geocodes to a real
+boundary **polygon** (a city or district). Most *neighbourhood* names come back from Nominatim as
+a bare **point**, which `graph_from_place` rejects outright - all four Pune neighbourhoods tested
+(Karve Nagar, Shivajinagar, Deccan Gymkhana, Aundh) failed exactly this way. So it falls back to
+`graph_from_address` with the sidebar radius, which geocodes to a point and takes a distance. That
+radius also bounds the download: an unbounded `"Pune, Maharashtra, India"` ran past two minutes
+and would hang a live demo.
+
+**The fetch itself is unverified.** OSM has two services behind it - Nominatim for geocoding,
+Overpass for road data - and from the machine this was developed on, Overpass took 15 s just to
+answer a status ping and never returned a graph. Everything *around* the fetch is tested offline
+(`test_flatten_projected_*`, `test_osm_graph_*`): the lat/lon swap, the parallel-edge collapse,
+the self-loop drop, the fallback order, and the error message. **Run it once on your own
+connection before relying on it in the demo.** If it fails, the dashboard now shows what each
+strategy said instead of a traceback, and the synthetic grid always works offline.
+
 ## Still to do
 
-- **A* for stage 5**, to give the plan's "Dijkstra / A*" comparison a second data point.
-- **OpenStreetMap path is untested.** Everything above was verified on the synthetic grid;
-  `osm_graph` needs a live network and has no test coverage.
-- Wire `bench.py` output into the final report document.
+- **A\* for stage 5**, to give the plan's "Dijkstra / A\*" comparison a second data point.
+- **Verify the OSM fetch end to end** on a connection with working Overpass access (above).
+- **The final report itself.** `docs/np-hardness.md` covers milestone 7's theory half and
+  `bench/` holds the runtime curves, but the report document has not been written.
