@@ -19,6 +19,10 @@ with st.sidebar:
     seed = st.number_input("Seed", 0, 999, 0)
     limit = st.slider("Exact solver time limit (s)", 5, 60, 20)
     extra = st.slider("Redundant backbone links", 0, 5, 2)
+    redundancy = st.radio("Redundancy placement", ["bridges", "cheapest"], horizontal=True,
+                          help="bridges: spend each link where it removes a single point of "
+                               "failure. cheapest: the globally cheapest links, which may leave "
+                               "a bridge standing.")
     mbps = st.slider("Mbps per customer", 1, 20, 5)
     budget = st.slider("Per-tower equipment budget (k$)", 4, 23, 12)
     run = st.button("Plan network", type="primary")
@@ -56,9 +60,10 @@ if run:
     caps, picks, spends = P.equip_towers(C, sites, dem_greedy, budget)
     dem, unserved = P.assign_customers_flow(G, C, D, sites, caps, mbps)
     total_demand = sum(d["w"] for d in D) * mbps
-    edges, cable = P.backbone(G, towers, extra)
+    edges, cable, dm = P.backbone(G, towers, extra, strategy=redundancy)
     xs = [G.nodes[t]["x"] for t in towers]; ys = [G.nodes[t]["y"] for t in towers]
     exch = min(range(len(sites)), key=lambda i: (xs[i] - sum(xs) / len(xs)) ** 2 + (ys[i] - sum(ys) / len(ys)) ** 2)
+    spof = P.bridges(len(sites), [(i, j) for i, j, _ in edges])
     net = P.build_flow_network(caps, edges, dem, exch)
     flow, cut = P.edmonds_karp(net, "EX", "SINK")
     cut_rows, cut_links, cut_nodes = P.describe_cut(cut)
@@ -67,7 +72,8 @@ if run:
                                  cut_nodes=cut_nodes, dem=dem, exch=exch, caps=caps, picks=picks,
                                  spends=spends, dropped=dropped, comps_dropped=comps_dropped,
                                  dem_greedy=dem_greedy, unserved=unserved,
-                                 total_demand=total_demand)
+                                 total_demand=total_demand, spof=spof, extra=extra,
+                                 redundancy=redundancy)
 
 r = st.session_state.get("r")
 if not r:
@@ -149,9 +155,12 @@ for d in D:
     folium.CircleMarker(ll(d["node"]), radius=2 + d["w"] / 8, color="gray", fill=True, weight=1).add_to(m)
 for i, j, dist in r["edges"]:
     bott = frozenset((i, j)) in r["cut_links"]
-    folium.PolyLine([ll(r["towers"][i]), ll(r["towers"][j])], color="red" if bott else "blue",
-                    weight=5 if bott else 2,
-                    tooltip=f"{dist:.0f} m" + (" (saturated: min-cut)" if bott else "")).add_to(m)
+    brid = frozenset((i, j)) in r["spof"]
+    colour = "red" if bott else ("darkorange" if brid else "blue")
+    note = (" (saturated: min-cut)" if bott else "") + (" (single point of failure)" if brid else "")
+    folium.PolyLine([ll(r["towers"][i]), ll(r["towers"][j])], color=colour,
+                    weight=5 if (bott or brid) else 2,
+                    tooltip=f"{dist:.0f} m" + note).add_to(m)
 for k, s in enumerate(r["sites"]):
     c = C[s]
     folium.Circle(ll(c["node"]), radius=P.RADIUS[c["tier"]], color="green" if c["tier"] == "mid" else "purple",
@@ -182,6 +191,21 @@ if abs(dist - dist_a) > 1e-6:
 if path:
     folium.PolyLine([ll(n) for n in path], color="orange", weight=5).add_to(m)
 st_folium(m, height=550, width=None, returned_objects=[])
+
+# ---- stage 3 resilience ----
+st.subheader("Stage 3: backbone resilience (single points of failure)")
+spof = sorted(tuple(sorted(b)) for b in r["spof"])
+if spof:
+    st.warning(f"**{len(spof)} single point(s) of failure**: "
+               + ", ".join(f"T{i}-T{j}" for i, j in spof)
+               + ". Cutting any one of these splits the backbone in two.")
+else:
+    st.success(f"No single points of failure: every tower has at least two independent paths "
+               f"to the rest of the backbone.")
+st.caption(f"{len(r['edges'])} links = {len(r['sites']) - 1} spanning-tree links + {r['extra']} "
+           f"redundant, placed by the **{r['redundancy']}** rule. A spanning tree alone is all "
+           f"bridges by definition, so redundancy is the only thing that removes them. Found with "
+           f"Tarjan's DFS low-link algorithm, O(V+E).")
 
 # ---- stage 4 ----
 st.subheader("Stage 4: bottleneck (min-cut)")

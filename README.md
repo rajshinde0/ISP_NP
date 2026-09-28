@@ -43,6 +43,7 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | 2 | Equipment per tower under budget | 0/1 knapsack DP (`knapsack`, `equip_towers`) | O(n · B) per tower | III |
 | 2b | Assign customers within capacity | Max-flow on a bipartite network (`assign_customers_flow`) | O(V · E²) | V |
 | 3 | Wire towers with least cable | Prim MST over the road-distance metric closure (`backbone`) | k Dijkstras + O(k²) | II / IV |
+| 3 | Find single points of failure | Tarjan bridge-finding by DFS low-link (`bridges`) | O(V+E) | I |
 | 4 | Push bandwidth from exchange, find bottleneck | Edmonds–Karp max-flow / min-cut (`edmonds_karp`) | O(V · E²) | V |
 | 5 | Route signal tower → customer | Binary-heap Dijkstra (`dijkstra`) | O((V+E) log V) | II |
 | 5 | ...the same answer, guided | A* with a straight-line heuristic (`astar`) | O((V+E) log V), far smaller constant | II |
@@ -107,6 +108,35 @@ instead of silently claiming full service.
 **Circular dependency, and how it is broken.** Equipment is sized from the load, but a
 capacity-aware assignment needs the capacities. Two phases: the greedy pass gives a provisional
 load to buy against, then max-flow reassigns optimally against what was bought.
+
+## Stage 3: single points of failure
+
+A spanning tree is **entirely** bridges - cut any link and the backbone splits - so the redundant
+links are the only thing that buys resilience. `bridges()` finds what remains, by Tarjan's DFS
+low-link algorithm, and the dashboard names them and paints them orange on the map.
+
+Two placement rules, selectable in the sidebar:
+
+- `cheapest` - the globally cheapest non-tree links.
+- `bridges` (default) - each round, the cheapest link that removes at least one bridge.
+
+**How much does targeting actually help? Less than expected, and the honest answer is "sometimes".**
+Sweeping 225 configurations (25 seeds x 3 candidate counts x 3 link budgets), the two rules produce
+a *different* number of single points of failure in only **29 of them (13%)**. The cheapest link
+usually happens to cover a bridge anyway. On the default instance they are identical.
+
+When they do differ, `bridges` always wins, and sometimes pays for it in cable:
+
+| instance | cheapest | bridges |
+|---|---|---|
+| seed 3, \|C\|=20, 2 extra links | 1 failure point, 11.9 km | **0 failure points**, 13.2 km |
+| seed 2, \|C\|=14, 3 extra links | 1 failure point, 16.0 km | **0 failure points**, 16.0 km |
+| seed 1, \|C\|=20, 3 extra links | 3 failure points, 14.9 km | **2 failure points**, 15.2 km |
+
+So the tests assert the real invariant - `bridges` never leaves *more* failure points than
+`cheapest` at the same budget - rather than a improvement that does not always exist. The reporting
+is arguably the bigger win: the default backbone has a single point of failure and nothing said so
+before.
 
 ## Stage 5: what the A* heuristic buys
 

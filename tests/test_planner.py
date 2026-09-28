@@ -206,7 +206,7 @@ def test_backbone_matches_networkx_mst(graph):
         towers = [C[i]["node"] for i in sites]
         if len(towers) < 3:
             continue
-        edges, total = P.backbone(graph, towers, extra_links=0)
+        edges, total, _ = P.backbone(graph, towers, extra_links=0)
         K = nx.Graph()
         for i, t in enumerate(towers):
             dist, _ = P.dijkstra(graph, t)
@@ -222,7 +222,7 @@ def test_backbone_tree_is_spanning_and_acyclic(graph):
     D, C, _ = instance(graph, seed=1)
     sites = P.greedy_cover(C, D)["sites"]
     towers = [C[i]["node"] for i in sites]
-    edges, _ = P.backbone(graph, towers, extra_links=0)
+    edges, _, _ = P.backbone(graph, towers, extra_links=0)
     T = nx.Graph([(i, j) for i, j, _ in edges])
     assert T.number_of_nodes() == len(towers)
     assert nx.is_connected(T) and nx.is_tree(T)
@@ -234,12 +234,125 @@ def test_backbone_extra_links_add_cycles(graph):
     D, C, _ = instance(graph, seed=1)
     sites = P.greedy_cover(C, D)["sites"]
     towers = [C[i]["node"] for i in sites]
-    tree, tree_len = P.backbone(graph, towers, extra_links=0)
-    plus, plus_len = P.backbone(graph, towers, extra_links=2)
+    tree, tree_len, _ = P.backbone(graph, towers, extra_links=0)
+    plus, plus_len, _ = P.backbone(graph, towers, extra_links=2)
     assert len(plus) == len(tree) + 2
     assert plus_len >= tree_len
     pairs = [frozenset((i, j)) for i, j, _ in plus]
     assert len(pairs) == len(set(pairs))                          # no duplicated link
+
+
+# ---------------- Stage 3: bridges (Tarjan / DFS) ----------------
+def test_bridges_matches_networkx_on_random_graphs():
+    rng = random.Random(0)
+    for _ in range(300):
+        k = rng.randint(2, 9)
+        links = {(i, j) for i in range(k) for j in range(i + 1, k) if rng.random() < 0.35}
+        H = nx.Graph()
+        H.add_nodes_from(range(k))
+        H.add_edges_from(links)
+        ref = {frozenset(b) for b in nx.bridges(H)} if H.number_of_edges() else set()
+        assert P.bridges(k, links) == ref
+
+
+def test_bridges_on_the_textbook_shapes():
+    assert P.bridges(4, [(0, 1), (1, 2), (2, 3)]) == {
+        frozenset({0, 1}), frozenset({1, 2}), frozenset({2, 3})}      # a path: all bridges
+    assert P.bridges(4, [(0, 1), (1, 2), (2, 3), (3, 0)]) == set()    # a cycle: none
+    # barbell: two triangles joined by one link - only the bar is a bridge
+    barbell = [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3), (2, 3)]
+    assert P.bridges(6, barbell) == {frozenset({2, 3})}
+    assert P.bridges(3, []) == set()                                  # no edges at all
+
+
+def test_bridges_ignores_self_loops_and_duplicate_links():
+    """Two towers joined twice have no bridge between them. The usual skip-the-parent trick gets
+    this wrong, which is why _covering dedupes into a set first."""
+    assert P.bridges(2, [(0, 1), (0, 1)]) == set()
+    assert P.bridges(2, [(0, 0), (0, 1)]) == {frozenset({0, 1})}
+
+
+def test_bridges_handles_a_long_chain_without_blowing_the_stack():
+    """Iterative DFS, not recursive: a 4000-tower chain must not hit the recursion limit."""
+    n = 4000
+    assert len(P.bridges(n, [(i, i + 1) for i in range(n - 1)])) == n - 1
+
+
+def test_a_spanning_tree_is_entirely_bridges(graph):
+    """Which is why redundancy is the only thing that can remove a single point of failure."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 20)["sites"]]
+    edges, _, _ = P.backbone(graph, towers, extra_links=0)
+    assert len(P.bridges(len(towers), [(i, j) for i, j, _ in edges])) == len(towers) - 1
+
+
+def test_bridge_strategy_never_leaves_more_failure_points_than_cheapest(graph):
+    """The real invariant. The two agree on most instances - the cheapest link often happens to
+    cover a bridge anyway - so this asserts 'never worse', not 'always better'."""
+    worse = 0
+    for seed in (0, 1, 2, 3):
+        D, C, _ = P.make_instance(graph, 60, 20, seed)
+        sites = P.exact_cover(graph and C, D, 10)["sites"]
+        towers = [C[i]["node"] for i in sites]
+        dm = P.road_distance_matrix(graph, towers)
+        for extra in (1, 2, 3):
+            counts = {}
+            for strat in ("cheapest", "bridges"):
+                e, _, _ = P.backbone(graph, towers, extra, strategy=strat, dm=dm)
+                assert len(e) == len(towers) - 1 + extra, "both must spend the same link budget"
+                counts[strat] = len(P.bridges(len(towers), [(i, j) for i, j, _ in e]))
+            if counts["bridges"] > counts["cheapest"]:
+                worse += 1
+    assert worse == 0, "the bridge-targeted rule left more single points of failure"
+
+
+def test_bridge_strategy_wins_on_an_instance_where_cheapest_does_not(graph):
+    """Pins a case where the rule actually pays, found by sweeping seeds: it buys a little more
+    cable to clear the last single point of failure."""
+    D, C, _ = P.make_instance(graph, 60, 20, 3)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    dm = P.road_distance_matrix(graph, towers)
+    res = {}
+    for strat in ("cheapest", "bridges"):
+        e, total, _ = P.backbone(graph, towers, 2, strategy=strat, dm=dm)
+        res[strat] = (len(P.bridges(len(towers), [(i, j) for i, j, _ in e])), total)
+    assert res["cheapest"][0] > res["bridges"][0] == 0, f"expected an improvement, got {res}"
+    assert res["bridges"][1] >= res["cheapest"][1], "resilience here costs a little extra cable"
+
+
+def test_the_redundancy_strategy_does_not_change_the_spanning_tree(graph):
+    """Only the extra links differ; the MST underneath must be identical."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    dm = P.road_distance_matrix(graph, towers)
+    tree, _, _ = P.backbone(graph, towers, 0, dm=dm)
+    tree_set = {frozenset(e[:2]) for e in tree}
+    for strat in ("cheapest", "bridges"):
+        e, _, _ = P.backbone(graph, towers, 3, strategy=strat, dm=dm)
+        assert tree_set <= {frozenset(x[:2]) for x in e}
+
+
+def test_unknown_redundancy_strategy_is_rejected(graph):
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    with pytest.raises(ValueError, match="unknown redundancy strategy"):
+        P.backbone(graph, towers, 2, strategy="nonsense")
+
+
+def test_backbone_returns_a_reusable_distance_matrix(graph):
+    """Returned so the exchange choice and a second MST need not pay for k more Dijkstras."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 10)["sites"]]
+    edges, total, dm = P.backbone(graph, towers, 2)
+    k = len(towers)
+    assert len(dm) == k and all(len(row) == k for row in dm)
+    for i in range(k):
+        assert dm[i][i] == pytest.approx(0.0)
+        for j in range(k):
+            assert dm[i][j] == pytest.approx(dm[j][i]), "road distances are symmetric here"
+    # passing it back in must reproduce the identical backbone
+    again, total2, _ = P.backbone(graph, towers, 2, dm=dm)
+    assert again == edges and total2 == pytest.approx(total)
 
 
 # ---------------- Stage 4: Edmonds-Karp ----------------
@@ -335,7 +448,7 @@ def test_flow_never_exceeds_total_demand_or_total_capacity(graph):
         cust = P.assign_customers(graph, C, D, sites)
         dem = [cust[k] * 5 for k in range(len(sites))]
         caps, _, _ = P.equip_towers(C, sites, dem, 12)
-        edges, _ = P.backbone(graph, [C[i]["node"] for i in sites], 2)
+        edges, _, _ = P.backbone(graph, [C[i]["node"] for i in sites], 2)
         net = P.build_flow_network(caps, edges, dem, 0)
         flow, cut = P.edmonds_karp(net, "EX", "SINK")
         assert 0 <= flow <= sum(dem)

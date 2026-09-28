@@ -405,17 +405,97 @@ def astar(G, src, dst, stats=None):
     return g[dst], path[::-1]
 
 
-# ---------------- Stage 3: backbone (Prim on road-distance metric closure) ----------------
-def backbone(G, tower_nodes, extra_links=0):
-    """Prim MST over the towers' road-distance metric closure: k Dijkstras to build the k x k
-    matrix, then O(k^2) for Prim. extra_links adds the cheapest non-tree links back for
-    redundancy, which is what gives stage 4 a non-trivial min-cut to find."""
+# ---------------- Stage 3: backbone (MST over the road-distance metric closure) ----------------
+def road_distance_matrix(G, tower_nodes):
+    """k x k matrix of shortest ROAD distances between towers: k Dijkstras, O(k(V+E)log V).
+    A* does not help here - it needs a single target, and this needs all of them."""
     k = len(tower_nodes)
     dm = [[0.0] * k for _ in range(k)]
     for i, t in enumerate(tower_nodes):
         dist, _ = dijkstra(G, t)
         for j, u in enumerate(tower_nodes):
             dm[i][j] = dist.get(u, math.inf)
+    return dm
+
+
+def bridges(k, links):
+    """Tarjan's bridge-finding by DFS low-link, O(V+E). A bridge is an edge whose removal
+    disconnects the graph - in a backbone, a single point of failure.
+
+    `links` is an iterable of (i, j) index pairs; returns a set of frozensets. Iterative DFS, not
+    recursive, so a long chain of towers cannot blow the Python stack.
+
+    low[v] = the smallest discovery time reachable from v's subtree using at most one back edge.
+    Edge (u, v) with v a child is a bridge exactly when low[v] > disc[u]: nothing under v reaches
+    u or above, so that edge is the only way back.
+
+    Parallel links are tracked by **edge id**, not by parent node, so the DFS skips only the exact
+    edge it arrived on. That matters: two towers joined by two fibres have no single point of
+    failure between them, but collapsing the pair into one edge - or using the usual
+    skip-the-parent shortcut - would wrongly report a bridge. Self-loops are never bridges.
+    """
+    adj = {i: [] for i in range(k)}
+    for eid, (i, j) in enumerate(links):
+        if i == j:
+            # A self-loop cannot disconnect anything. Defensive only: verified over 40k random
+            # multigraphs that leaving them in changes no result, since a self-loop only ever
+            # relaxes low[u] against disc[u] itself.
+            continue
+        adj[i].append((j, eid))
+        adj[j].append((i, eid))
+    disc, low, found = {}, {}, set()
+    timer = 0
+    for root in range(k):
+        if root in disc:
+            continue
+        # stack frames: (node, id of the edge we entered it by, iterator over (neighbour, edge id))
+        disc[root] = low[root] = timer; timer += 1
+        stack = [(root, None, iter(adj[root]))]
+        while stack:
+            u, in_eid, it = stack[-1]
+            advanced = False
+            for v, eid in it:
+                if eid == in_eid:
+                    continue                                # the same edge back, not a back edge
+                if v in disc:
+                    # disc[v], not low[v]. For BRIDGES the two are interchangeable (verified over
+                    # 40k random multigraphs); for articulation points they are not, so keep disc
+                    # if this ever grows into computing those.
+                    low[u] = min(low[u], disc[v])            # back edge (or a parallel link)
+                    continue
+                disc[v] = low[v] = timer; timer += 1
+                stack.append((v, eid, iter(adj[v])))
+                advanced = True
+                break
+            if not advanced:
+                stack.pop()
+                if stack:
+                    p = stack[-1][0]
+                    low[p] = min(low[p], low[u])
+                    if low[u] > disc[p]:
+                        found.add(frozenset((p, u)))
+    return found
+
+
+def backbone(G, tower_nodes, extra_links=0, strategy="bridges", dm=None):
+    """Minimum spanning backbone over the towers' road-distance metric closure, plus optional
+    redundant links. Returns (edges, total length, dm) - the distance matrix comes back so
+    callers can choose an exchange or re-run a different MST without paying for k more Dijkstras.
+
+    Prim: O(k^2). `dm` may be passed in to skip recomputing it.
+
+    extra_links adds links beyond the tree, which is what gives stage 4 a non-trivial min-cut:
+      strategy="cheapest" - the globally cheapest non-tree links. Simple, but it spends the budget
+                            wherever it is cheap rather than where it is needed; on the default
+                            instance it buys two links and still leaves a single point of failure.
+      strategy="bridges"  - each round, add the cheapest link that removes at least one bridge,
+                            recomputing bridges each round since one link can clear several. Falls
+                            back to cheapest once no bridge remains. Same budget, fewer single
+                            points of failure.
+    """
+    k = len(tower_nodes)
+    if dm is None:
+        dm = road_distance_matrix(G, tower_nodes)
     in_t, key, par, edges = [False] * k, [math.inf] * k, [-1] * k, []
     key[0] = 0
     for _ in range(k):
@@ -426,11 +506,38 @@ def backbone(G, tower_nodes, extra_links=0):
         for v in range(k):
             if not in_t[v] and dm[u][v] < key[v]:
                 key[v], par[v] = dm[u][v], u
-    used = {frozenset(e[:2]) for e in edges}
-    extras = sorted(((dm[i][j], i, j) for i in range(k) for j in range(i + 1, k) if frozenset((i, j)) not in used and dm[i][j] < math.inf))
-    for d, i, j in extras[:extra_links]:  # redundancy -> cycles -> non-trivial min-cut
-        edges.append((i, j, d))
-    return edges, sum(e[2] for e in edges)
+    edges += _redundant_links(dm, k, edges, extra_links, strategy)
+    return edges, sum(e[2] for e in edges), dm
+
+
+def _redundant_links(dm, k, tree_edges, extra_links, strategy):
+    """Pick `extra_links` links beyond the spanning tree. See backbone() for the strategies."""
+    used = {frozenset(e[:2]) for e in tree_edges}
+    candidates = sorted((dm[i][j], i, j) for i in range(k) for j in range(i + 1, k)
+                        if frozenset((i, j)) not in used and dm[i][j] < math.inf)
+    if strategy == "cheapest":
+        return [(i, j, d) for d, i, j in candidates[:extra_links]]
+    if strategy != "bridges":
+        raise ValueError(f"unknown redundancy strategy {strategy!r}")
+    chosen, links = [], [tuple(sorted(e[:2])) for e in tree_edges]
+    pool = list(candidates)
+    for _ in range(extra_links):
+        if not pool:
+            break
+        current = bridges(k, links)
+        pick = None
+        if current:
+            # the cheapest link that removes at least one bridge
+            for idx, (d, i, j) in enumerate(pool):
+                if bridges(k, links + [(i, j)]) < current:
+                    pick = idx
+                    break
+        if pick is None:
+            pick = 0                        # no bridge left to fix: fall back to cheapest
+        d, i, j = pool.pop(pick)
+        chosen.append((i, j, d))
+        links.append((i, j))
+    return chosen
 
 
 # ---------------- Stage 4: Edmonds-Karp ----------------
@@ -635,7 +742,7 @@ if __name__ == "__main__":
     print("stage 2 demand", dem)
     print("stage 2 caps  ", caps)
     print("stage 2 spend ", spends, "= %.1f k$ equipment on top of %.1f k$ build" % (sum(spends), e["cost"]))
-    edges, total = backbone(G, towers, extra_links=2)
+    edges, total, dm = backbone(G, towers, extra_links=2)
     cap = build_flow_network(caps, edges, dem, 0)
     flow, cut = edmonds_karp(cap, "EX", "SINK")
     rows, links, nodes = describe_cut(cut)

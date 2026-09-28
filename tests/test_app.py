@@ -128,6 +128,21 @@ def test_stage_5_compares_dijkstra_against_astar(planned):
     assert not planned.error, [str(e.value) for e in planned.error]
 
 
+def test_stage_3_reports_single_points_of_failure(planned):
+    """Either a warning naming them or a success saying there are none - never silence."""
+    headers = [str(h.value) for h in planned.subheader]
+    assert any("resilience" in h for h in headers)
+    said = ([str(w.value) for w in planned.warning] + [str(x.value) for x in planned.success])
+    assert any("single point" in t or "No single points" in t for t in said), said
+
+
+def test_redundancy_strategy_control_exists():
+    at = AppTest.from_file("app.py", default_timeout=300)
+    at.run()
+    labels = [str(rd.label) for rd in at.radio]
+    assert any("Redundancy" in l for l in labels), labels
+
+
 def test_no_streamlit_exceptions_anywhere(planned):
     assert not planned.exception
     assert len(planned.error) == 0, [str(e.value) for e in planned.error]
