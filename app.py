@@ -126,11 +126,24 @@ for k, s in enumerate(r["sites"]):
                   f"{', EXCHANGE' if k == r['exch'] else ''}"
                   f"{', OWN KIT SATURATED' if k in r['cut_nodes'] else ''})").add_to(m)
 
-st.subheader("Stage 5: signal routing")
+st.subheader("Stage 5: signal routing — Dijkstra vs A*")
 tk = st.selectbox("From tower", range(len(r["sites"])))
 dj = st.selectbox("To customer", range(len(D)))
-dist, path = P.dijkstra(G, r["towers"][tk], D[dj]["node"])
+s_d, s_a = {}, {}
+dist, path = P.dijkstra(G, r["towers"][tk], D[dj]["node"], stats=s_d)
+dist_a, path_a = P.astar(G, r["towers"][tk], D[dj]["node"], stats=s_a)
 st.write(f"Shortest road path: **{dist:.0f} m**, {len(path)} intersections")
+saved = 1 - s_a["popped"] / max(1, s_d["popped"])
+st.table([{"algorithm": "Dijkstra", "distance m": round(dist), "nodes expanded": s_d["popped"],
+           "guarantee": "optimal"},
+          {"algorithm": "A* (straight-line h)", "distance m": round(dist_a),
+           "nodes expanded": s_a["popped"], "guarantee": "optimal (h is admissible)"}])
+st.caption(f"A* expanded **{saved:.0%} fewer nodes** for the same answer. The heuristic is a "
+           f"straight-line distance in projected metres, which never over-estimates a road "
+           f"distance - so A* is exact, not approximate. It prunes least when the target is far "
+           f"across the map, since then almost every node lies on a plausible route.")
+if abs(dist - dist_a) > 1e-6:
+    st.error(f"A* and Dijkstra disagree ({dist_a:.1f} vs {dist:.1f}) - the heuristic is not admissible.")
 if path:
     folium.PolyLine([ll(n) for n in path], color="orange", weight=5).add_to(m)
 st_folium(m, height=550, width=None, returned_objects=[])

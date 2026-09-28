@@ -89,6 +89,113 @@ def test_dijkstra_same_node_and_unreachable():
     assert d == math.inf and path == []
 
 
+# ---------------- Stage 5: A* ----------------
+def test_astar_finds_the_same_distances_as_dijkstra_and_networkx(graph):
+    """A* is only worth anything if it is still exact. Admissibility is the whole argument."""
+    rng = random.Random(11)
+    nodes = list(graph.nodes)
+    for _ in range(40):
+        s, t = rng.sample(nodes, 2)
+        da, path = P.astar(graph, s, t)
+        dd, _ = P.dijkstra(graph, s, t)
+        ref = nx.dijkstra_path_length(graph, s, t, weight="length")
+        assert da == pytest.approx(dd, rel=1e-9)
+        assert da == pytest.approx(ref, rel=1e-9)
+        assert path[0] == s and path[-1] == t
+        assert all(graph.has_edge(u, v) for u, v in zip(path, path[1:]))
+        assert sum(graph[u][v]["length"] for u, v in zip(path, path[1:])) == pytest.approx(da, rel=1e-9)
+
+
+def test_astar_explores_fewer_nodes_than_dijkstra(graph):
+    """The point of the heuristic. Measured over many pairs so one lucky pair cannot carry it."""
+    rng = random.Random(12)
+    nodes = list(graph.nodes)
+    tot_a = tot_d = 0
+    for _ in range(25):
+        s, t = rng.sample(nodes, 2)
+        sa, sd = {}, {}
+        P.astar(graph, s, t, stats=sa)
+        P.dijkstra(graph, s, t, stats=sd)
+        assert sa["popped"] <= sd["popped"], "A* expanded more nodes than Dijkstra on some pair"
+        tot_a += sa["popped"]; tot_d += sd["popped"]
+    assert tot_a < tot_d * 0.5, f"expected a big saving, got {tot_a} vs {tot_d}"
+
+
+def test_astar_same_node_and_unreachable_match_dijkstra():
+    G = nx.Graph()
+    G.add_node(1, x=0.0, y=0.0); G.add_node(2, x=3.0, y=4.0)
+    G.add_node(8, x=99.0, y=0.0); G.add_node(9, x=99.0, y=1.0)
+    G.add_edge(1, 2, length=5.0)
+    G.add_edge(8, 9, length=1.0)                      # separate component
+    assert P.astar(G, 1, 1) == (0.0, [1])
+    assert P.dijkstra(G, 1, 1) == (0.0, [1])
+    d, path = P.astar(G, 1, 9)
+    assert d == math.inf and path == []
+
+
+def test_astar_stats_are_recorded_and_the_return_shape_is_unchanged(graph):
+    """dijkstra's stats dict must be purely additive: every existing caller unpacks two values."""
+    src = next(iter(graph.nodes))
+    dst = list(graph.nodes)[-1]
+    st = {}
+    d, path = P.dijkstra(graph, src, dst, stats=st)
+    assert st["popped"] > 0
+    dist_map, prev = P.dijkstra(graph, src, stats=st)   # dst=None branch still returns two values
+    assert st["popped"] > 0 and isinstance(dist_map, dict) and isinstance(prev, dict)
+    st2 = {}
+    P.astar(graph, src, dst, stats=st2)
+    assert st2["popped"] > 0
+
+
+def test_astar_saving_on_the_tower_to_customer_queries_the_app_actually_runs(graph):
+    """Pins the figure the README quotes, in the regime the dashboard uses: a built tower to a
+    demand point. On synthetic_graph each edge length IS the straight-line distance between its
+    endpoints, so h is not just admissible but exact - hence the large saving."""
+    D, C, _ = P.make_instance(graph, 60, 20, 0)
+    towers = [C[i]["node"] for i in P.exact_cover(C, D, 20)["sites"]]
+    tot_a = tot_d = 0
+    for t in towers:
+        for d in D[:6]:
+            sa, sd = {}, {}
+            P.astar(graph, t, d["node"], stats=sa)
+            P.dijkstra(graph, t, d["node"], stats=sd)
+            tot_a += sa["popped"]; tot_d += sd["popped"]
+    saving = 1 - tot_a / tot_d
+    assert saving > 0.6, f"heuristic saving collapsed to {saving:.0%}"
+
+
+def test_astar_never_expands_a_node_twice(graph):
+    """With a *consistent* heuristic (the triangle inequality holds for straight lines) a settled
+    node's g is final, so A* should expand each node exactly once. Asserting expansions == settled
+    pins the `done` guard: dropping it still returns the right distance, so only this invariant
+    catches it."""
+    rng = random.Random(13)
+    nodes = list(graph.nodes)
+    for _ in range(15):
+        s, t = rng.sample(nodes, 2)
+        st = {}
+        P.astar(graph, s, t, stats=st)
+        assert st["expansions"] == st["settled"],             f"expanded {st['expansions']} times but settled only {st['settled']} nodes"
+        assert st["settled"] <= graph.number_of_nodes()
+        assert st["popped"] >= st["expansions"], "every expansion comes from a pop"
+
+
+def test_astar_saves_least_on_the_longest_paths(graph):
+    """A* wins by being *directed*. When the goal is on the far side of the map almost every node
+    lies on a plausible route, so there is little left to prune and the saving nearly vanishes -
+    measured at ~11% between opposite corners versus ~85% for typical queries. Documenting this
+    matters: it is why the k Dijkstras in backbone() were left alone (no single target at all) and
+    it stops the report over-claiming what the heuristic buys."""
+    nodes = sorted(graph.nodes, key=lambda n: graph.nodes[n]["x"] + graph.nodes[n]["y"])
+    corner_a, corner_b = nodes[0], nodes[-1]
+    sa, sd = {}, {}
+    da, _ = P.astar(graph, corner_a, corner_b, stats=sa)
+    dd, _ = P.dijkstra(graph, corner_a, corner_b, stats=sd)
+    assert da == pytest.approx(dd, rel=1e-9), "still exact, however little it prunes"
+    assert sa["popped"] <= sd["popped"]
+    assert 1 - sa["popped"] / sd["popped"] < 0.5,         "if antipodal queries ever prune well, re-measure the README's figures"
+
+
 # ---------------- Stage 3: Prim MST ----------------
 def test_backbone_matches_networkx_mst(graph):
     """Prim runs on the towers' road-distance metric closure, so the oracle must run on that

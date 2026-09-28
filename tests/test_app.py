@@ -89,6 +89,26 @@ def test_dijkstra_routing_section_reports_a_path(planned):
     assert any("Shortest road path" in str(m.value) for m in planned.markdown)
 
 
+def test_stage_5_compares_dijkstra_against_astar(planned):
+    """Both must appear, agree on the distance, and A* must expand fewer nodes."""
+    headers = [str(h.value) for h in planned.subheader]
+    assert any("Dijkstra vs A*" in h for h in headers)
+    rows = None
+    for t in planned.table:
+        cols = list(t.value.columns) if hasattr(t.value, "columns") else []
+        if "nodes expanded" in cols:
+            rows = t.value
+            break
+    assert rows is not None, "the Dijkstra-vs-A* table did not render"
+    algos = list(rows["algorithm"])
+    assert any("Dijkstra" in a for a in algos) and any("A*" in a for a in algos)
+    dists = list(rows["distance m"])
+    assert dists[0] == dists[1], f"A* disagreed with Dijkstra: {dists}"
+    expanded = list(rows["nodes expanded"])
+    assert expanded[1] <= expanded[0], "A* expanded more nodes than Dijkstra"
+    assert not planned.error, [str(e.value) for e in planned.error]
+
+
 def test_no_streamlit_exceptions_anywhere(planned):
     assert not planned.exception
     assert len(planned.error) == 0, [str(e.value) for e in planned.error]

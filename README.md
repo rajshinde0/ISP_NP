@@ -44,6 +44,7 @@ Choose "Synthetic grid (offline)" in the sidebar first; use "OpenStreetMap place
 | 3 | Wire towers with least cable | Prim MST over the road-distance metric closure (`backbone`) | k Dijkstras + O(k²) | II / IV |
 | 4 | Push bandwidth from exchange, find bottleneck | Edmonds–Karp max-flow / min-cut (`edmonds_karp`) | O(V · E²) | V |
 | 5 | Route signal tower → customer | Binary-heap Dijkstra (`dijkstra`) | O((V+E) log V) | II |
+| 5 | ...the same answer, guided | A* with a straight-line heuristic (`astar`) | O((V+E) log V), far smaller constant | II |
 | 6 | Dashboard | — | — | Result |
 
 ## Stage 1 is the headline: measured results
@@ -77,6 +78,23 @@ Four things for the report and the viva:
   cannot improve the incumbent.
 
 Greedy is strictly costlier than the optimum on 8 of 10 seeds, by up to 62%.
+
+## Stage 5: what the A* heuristic buys
+
+Same instance, comparing nodes expanded for an identical answer. The saving depends strongly on
+the query, which is worth stating rather than quoting one flattering number:
+
+| Query pattern | Dijkstra pops | A* pops | saved |
+|---|---|---|---|
+| A built tower to a demand point (what the app runs) | 2,012 | 302 | **85%** |
+| 40 uniformly random node pairs | 14,751 | 3,997 | 73% |
+| Every tower to the first six demand points | 12,357 | 3,933 | 68% |
+| **Opposite corners of the grid** | 2,186 | 1,949 | **11%** |
+
+The last row is the interesting one: A* wins by being *directed*, so when the target sits on the
+far side of the map almost every node lies on a plausible route and there is little left to prune.
+This is also why `backbone`'s k Dijkstras were left as Dijkstra - they need single-source-to-*all*
+distances, where a single-target heuristic does not apply at all.
 
 **[`docs/np-hardness.md`](docs/np-hardness.md)** works through why: the reduction from SET-COVER,
 why the hardness survives being restricted to disc coverage, Chvatal's H(d) bound with proof
@@ -127,9 +145,10 @@ Record these in the report so the writeup matches the code.
    upstream fibre is fed to `("out", exchange)` because it lands on the backbone switch rather
    than passing through that tower's access radio.
 3. **Stage 3 implements Prim only**; the plan said "Prim's / Kruskal's".
-4. **Stage 5 implements Dijkstra only**; the plan said "Dijkstra / A*". A* with a Euclidean
-   heuristic on the projected coordinates would be admissible (road length ≥ straight-line
-   distance) and is a cheap addition if a second Stage 5 comparison is wanted.
+4. **Stage 5's A\* is exact, not approximate.** The heuristic is the straight-line distance in
+   projected metres, which never over-estimates a road distance, so A\* returns Dijkstra's
+   optimum. It is also *consistent*, so no node is ever re-expanded - `astar` asserts that via
+   `stats["expansions"] == stats["settled"]`.
 5. **Stage 0 uses BFS only** for the connectivity check; the plan said "DFS/BFS".
 6. **The shared data keys differ from the plan's Section 3 wording** (`node` not `position`, `cost`
    not `build_cost`, `w` not `weight`, no explicit `eid`). The mapping is tabulated at the top of
@@ -176,7 +195,6 @@ strategy said instead of a traceback, and the synthetic grid always works offlin
 
 ## Still to do
 
-- **A\* for stage 5**, to give the plan's "Dijkstra / A\*" comparison a second data point.
 - **Verify the OSM fetch end to end** on a connection with working Overpass access (above).
 - **The final report itself.** `docs/np-hardness.md` covers milestone 7's theory half and
   `bench/` holds the runtime curves, but the report document has not been written.

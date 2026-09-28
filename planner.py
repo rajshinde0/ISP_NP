@@ -318,13 +318,17 @@ def equip_towers(C, sites, demand_mbps, base_budget=12):
     return caps, picks, spends
 
 
-# ---------------- Stage 5 (used by stage 3): Dijkstra ----------------
-def dijkstra(G, src, dst=None):
+# ---------------- Stage 5 (used by stage 3): Dijkstra and A* ----------------
+def dijkstra(G, src, dst=None, stats=None):
     """Binary-heap Dijkstra on edge "length". O((V+E) log V).
-    dst=None -> (dist, prev) over the whole reachable set; else (distance, path)."""
+    dst=None -> (dist, prev) over the whole reachable set; else (distance, path).
+    stats: optional dict, filled with {"popped": heap pops} so Dijkstra and astar can be
+    compared on exactly equal terms. The return shape never changes."""
     dist, prev, pq = {src: 0.0}, {}, [(0.0, src)]
+    popped = 0
     while pq:
         d, u = heapq.heappop(pq)
+        popped += 1
         if d > dist.get(u, math.inf):
             continue
         if u == dst:
@@ -334,6 +338,8 @@ def dijkstra(G, src, dst=None):
             if nd < dist.get(v, math.inf):
                 dist[v], prev[v] = nd, u
                 heapq.heappush(pq, (nd, v))
+    if stats is not None:
+        stats["popped"] = popped
     if dst is None:
         return dist, prev
     if dst not in dist:
@@ -342,6 +348,61 @@ def dijkstra(G, src, dst=None):
     while u != src:
         u = prev[u]; path.append(u)
     return dist[dst], path[::-1]
+
+
+def astar(G, src, dst, stats=None):
+    """A* on edge "length", guided towards dst by a straight-line heuristic.
+
+    h(n) = Euclidean distance from n to dst in the **projected metre** coordinates. This is
+    admissible: a road between two points is never shorter than the straight line between them,
+    so h never over-estimates, A* never settles a node too early, and the distance it returns is
+    exactly Dijkstra's optimum. It is also consistent (the triangle inequality holds for straight
+    lines), so no node needs re-expanding once settled.
+
+    On the synthetic grid h is not merely admissible but *exact* - synthetic_graph sets each edge
+    length to the Euclidean distance between its endpoints - which is why the node saving there is
+    so large (~85%). On real OSM roads, which bend, the heuristic is looser and the saving smaller.
+
+    O((V+E) log V) worst case, identical to Dijkstra: the heuristic changes the constant, not the
+    complexity, and degenerates to Dijkstra when h == 0. Returns (distance, path), the same shape
+    as dijkstra(G, src, dst).
+    """
+    tn = G.nodes[dst]
+
+    def h(n):
+        nn = G.nodes[n]
+        return math.hypot(nn["x"] - tn["x"], nn["y"] - tn["y"])
+
+    g, prev, done = {src: 0.0}, {}, set()
+    pq, popped, expansions, found = [(h(src), 0.0, src)], 0, 0, False
+    while pq:
+        _, gu, u = heapq.heappop(pq)
+        popped += 1
+        if u in done:                       # a stale heap entry for an already-settled node
+            continue
+        done.add(u)
+        expansions += 1
+        if u == dst:
+            found = True
+            break
+        for v, e in G[u].items():
+            nd = gu + e["length"]
+            if nd < g.get(v, math.inf):
+                g[v], prev[v] = nd, u
+                heapq.heappush(pq, (nd + h(v), nd, v))
+    if stats is not None:
+        # expansions == settled is the invariant a *consistent* heuristic buys: once a node is
+        # settled its g is final, so it never needs re-expanding. Dropping the `done` guard above
+        # would still give the right answer - it would just do this work more than once per node.
+        stats["popped"] = popped
+        stats["expansions"] = expansions
+        stats["settled"] = len(done)
+    if not found:
+        return math.inf, []
+    path, u = [dst], dst
+    while u != src:
+        u = prev[u]; path.append(u)
+    return g[dst], path[::-1]
 
 
 # ---------------- Stage 3: backbone (Prim on road-distance metric closure) ----------------
