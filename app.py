@@ -94,8 +94,11 @@ c1.metric("Towers built (exact)", len(r["sites"]))
 c2.metric("Project cost", f"{build + equip:.1f} k$", f"{build:.1f} build + {equip:.1f} equipment",
           delta_color="off")
 c3.metric("Backbone cable", f"{r['cable'] / 1000:.1f} km")
-c4.metric("Max flow / demand", f"{r['flow']} / {sum(r['dem'])} Mbps",
-          f"{100 * r['flow'] / max(1, sum(r['dem'])):.0f}% served", delta_color="off")
+# Percentage as the headline, absolutes underneath - matching the "Customers covered" tile. The
+# old form put "2510 / 2715 Mbps" in the value, which overflows a five-column row and renders as
+# "2510 / 2715 ..." with the figure that matters cut off.
+c4.metric("Bandwidth served", f"{100 * r['flow'] / max(1, sum(r['dem'])):.0f}%",
+          f"{r['flow']} of {sum(r['dem'])} Mbps", delta_color="off")
 c5.metric("Customers covered", f"{P.coverage_of_requested(r['ex'], D, r['dropped'])}%",
           f"{r['dropped']['count']} of {r['dropped']['requested']} unreachable", delta_color="off")
 
@@ -164,10 +167,16 @@ for i, j, dist in r["edges"]:
     bott = frozenset((i, j)) in r["cut_links"]
     brid = frozenset((i, j)) in r["spof"]
     colour = "red" if bott else ("darkorange" if brid else "blue")
-    note = (" (saturated: min-cut)" if bott else "") + (" (single point of failure)" if brid else "")
+    # A single point of failure is DASHED, not merely a different colour. Solid darkorange was
+    # near-indistinguishable from the solid orange stage-5 route at the same weight, so on the
+    # rendered map you could not tell the failure link from the path you had just asked for.
+    # Dashing also survives colour-blind viewing, which colour alone does not.
     folium.PolyLine([ll(r["towers"][i]), ll(r["towers"][j])], color=colour,
-                    weight=5 if (bott or brid) else 2,
-                    tooltip=f"{dist:.0f} m" + note).add_to(m)
+                    weight=6 if (bott or brid) else 2,
+                    dash_array="12,8" if brid and not bott else None,
+                    tooltip=f"{dist:.0f} m"
+                            + (" (saturated: min-cut)" if bott else "")
+                            + (" (single point of failure)" if brid else "")).add_to(m)
 for k, s in enumerate(r["sites"]):
     c = C[s]
     folium.Circle(ll(c["node"]), radius=P.RADIUS[c["tier"]], color="green" if c["tier"] == "mid" else "purple",
@@ -196,8 +205,19 @@ st.caption(f"A* expanded **{saved:.0%} fewer nodes** for the same answer. The he
 if abs(dist - dist_a) > 1e-6:
     st.error(f"A* and Dijkstra disagree ({dist_a:.1f} vs {dist:.1f}) - the heuristic is not admissible.")
 if path:
-    folium.PolyLine([ll(n) for n in path], color="orange", weight=5).add_to(m)
+    folium.PolyLine([ll(n) for n in path], color="orange", weight=5,
+                    tooltip=f"routed path, {dist:.0f} m").add_to(m)
 st_folium(m, height=550, width=None, returned_objects=[])
+# The map had no legend at all, so none of these encodings were discoverable.
+st.caption(
+    "Map key — "
+    "**grey dots** customers (size = weight) · "
+    "**green / purple circles** mid- and high-tier coverage · "
+    "**blue** backbone link · "
+    "**thick red** saturated link (stage 4 min-cut) · "
+    "**dashed orange** single point of failure · "
+    "**solid orange** the stage 5 routed path · "
+    "pin tooltips carry each tower's tier, cost and capacity.")
 
 # ---- stage 3 resilience ----
 st.subheader("Stage 3: backbone resilience (single points of failure)")

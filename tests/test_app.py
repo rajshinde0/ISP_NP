@@ -47,10 +47,15 @@ def test_planning_renders_the_metric_row(planned):
     values = [str(m.value) for m in planned.metric]
     labels = [str(m.label) for m in planned.metric]
     assert len(planned.metric) == 5, f"expected 5 metric tiles, got {labels}"
-    for expected in ("Towers built", "Project cost", "Backbone cable", "Max flow", "Customers covered"):
+    for expected in ("Towers built", "Project cost", "Backbone cable", "Bandwidth served",
+                     "Customers covered"):
         assert any(expected in l for l in labels), f"missing metric: {expected}"
     assert any("k$" in v for v in values)
     assert any("km" in v for v in values)
+    # The tile values must stay short enough for a five-column row; "2510 / 2715 Mbps" overflowed
+    # and rendered truncated as "2510 / 2715 ...". Percentages and short units only.
+    for m in planned.metric:
+        assert len(str(m.value)) <= 12, f"metric value too long for the row: {m.label}={m.value!r}"
 
 
 def test_project_cost_tile_includes_equipment_spend(planned):
